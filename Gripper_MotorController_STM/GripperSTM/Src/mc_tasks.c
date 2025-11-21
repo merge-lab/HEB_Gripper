@@ -187,7 +187,6 @@ __weak void MC_RunMotorControlTasks(void)
       MCP_Over_UartA.rxBuffer = MCP_Over_UartA.pTransportLayer->fRXPacketProcess(MCP_Over_UartA.pTransportLayer,
                                                                                 &MCP_Over_UartA.rxLength);
       /* USER CODE BEGIN MC_Scheduler 1 */
-
       /* USER CODE END MC_Scheduler 1 */
 
       hMFTaskCounterM1 = (uint16_t)MF_TASK_OCCURENCE_TICKS;
@@ -426,16 +425,7 @@ __weak void TSK_HardwareFaultTask(void)
 __weak void UI_HandleStartStopButton_cb (void)
 {
 /* USER CODE BEGIN START_STOP_BTN */
-	position_offset = htim4.Instance->CNT;
-	//if (IDLE == MC_GetSTMStateMotor1()) {
-		/* Ramp parameters should be tuned for the actual motor */
-		//MC_ProgramTorqueRampMotor1(1, 500);
-		//if (MC_StartMotor1()) {
-		//	position_offset = htim4.Instance->CNT;
-		//}
-	//} else {
-	//	(void) MC_StopMotor1();
-//	}
+	position_offset = (int32_t)ENCODER_M1._Super.hMecAngle;
 /* USER CODE END START_STOP_BTN */
 }
 

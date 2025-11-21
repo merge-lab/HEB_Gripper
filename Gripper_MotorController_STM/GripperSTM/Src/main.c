@@ -40,9 +40,13 @@ typedef enum {
 /* USER CODE BEGIN PD */
 #define TX_BUFFER_SIZE 256
 #define RX_BUFFER_SIZE 64
-const int DEADBAND_WIDTH = 70;
-const int RAMP_WIDTH = 140;
-const float MOTOR_TORQUE_CONSTANT_KT = 0.0212f;
+const int DEADBAND_WIDTH = 3;
+const int RAMP_WIDTH = 8;
+
+#define COUNTS_PER_REV      65536.0f
+#define DEGREES_PER_REV     360.0f
+#define COUNTS_TO_DEG       (DEGREES_PER_REV / COUNTS_PER_REV)
+#define SPEED_SCALE_DEG     (1000.0f * COUNTS_TO_DEG)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -82,9 +86,15 @@ volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
 uint8_t rx_index = 0;
 uint8_t rx_char;
 volatile bool command_ready = false;
-volatile uint32_t position_offset;
+volatile int32_t position_offset;
 volatile float torque_setpoint;
 volatile ControlType control_type;
+int16_t direction_correction = 1;
+
+volatile float debug_position = 0;
+volatile float debug_speed = 0;
+volatile bool debug_ready = false;
+volatile float debug_torque = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -127,6 +137,12 @@ int _write(int file, char *ptr, int len) {
 	} else {
 		return 0; // Failed to start
 	}
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2) {
+        HAL_UART_Receive_IT(&huart2, &rx_char, 1);
+    }
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
@@ -176,10 +192,7 @@ void handle_command() {
 	case 'f': {
 		uint16_t faults = MC_GetOccurredFaultsMotor1();
 
-		printf("--- Fault Report ---\n");
-		printf("Occurred Faults Code: 0x%X\n", faults);
-
-		if (faults == MC_NO_FAULTS) {
+		/*if (faults == MC_NO_FAULTS) {
 			printf(" -> No faults detected.\n");
 		}
 		if (faults & MC_DURATION) {
@@ -208,10 +221,8 @@ void handle_command() {
 		}
 		if (faults & MC_DP_FAULT) {
 			printf(" -> FAULT: Driver Protection Fault!\n");
-		}
-
-		printf("--------------------\n");
-		printf("Motor State is currently: %d\n", MC_GetSTMStateMotor1());
+		}*/
+		printf("f %u\n", faults);
 		break;
 
 	}
@@ -220,9 +231,9 @@ void handle_command() {
 	case 'A':
 	case 'a': {
 		if (MC_AcknowledgeFaultMotor1()) {
-			printf("Faults Acknowledged. Motor is now IDLE.\n");
+			printf("a 1\n");
 		} else {
-			printf("Could not acknowledge fault. (Not in FAULT_OVER state or fault is still active).\n");
+			printf("a 0\n");
 		}
 		break;
 	}
@@ -234,13 +245,10 @@ void handle_command() {
 		float value;
 		// Parse the buffer to extract the float value after the 'T'
 		if (sscanf((const char*) rx_buffer, "%c %f", &command_char, &value) == 2) {
-			float required_current_Iq = value / MOTOR_TORQUE_CONSTANT_KT;
-			printf("Torque command: %.2f Nm -> Req. Current: %.2f A\n", value, required_current_Iq);
-			//MC_ProgramTorqueRampMotor1_F(value, 0);
 			torque_setpoint = value;
-		} else {
-			printf("Invalid format for Torque command. Use 'T <value>'.\n");
+			printf("t 1\n");
 		}
+		printf("t 0\n");
 		break;
 	}
 
@@ -253,8 +261,6 @@ void handle_command() {
 				control_type = CONSTANT;
 			} else if (value == 1) {
 				control_type = SPRING;
-			} else {
-				printf("Invalid control type for motor.\n");
 			}
 		}
 		break;
@@ -262,7 +268,6 @@ void handle_command() {
 
 		// Default case for any other unknown command
 	default: {
-		printf("Unknown command.\n");
 		break;
 	}
 	}
@@ -272,69 +277,52 @@ uint32_t get_motor_enc() {
 	return htim4.Instance->CNT;
 }
 
-int32_t get_rel_motor_pos() {
-	uint32_t curr_pos = get_motor_enc();
-	if (position_offset >= curr_pos) {
-		uint32_t difference = position_offset - curr_pos;
-		if (difference <= M1_PULSE_NBR/2) {
-			return -(int32_t)difference;
-		} else {
-			return (int32_t)(M1_PULSE_NBR - difference);
-		}
-	} else {
-		uint32_t difference = curr_pos - position_offset;
-		if (difference <= M1_PULSE_NBR/2) {
-			return (int32_t)difference;
-		} else {
-			return -(int32_t)(M1_PULSE_NBR - difference);
-		}
-	}
+int32_t get_motor_pos() {
+	return (int32_t)ENCODER_M1._Super.hMecAngle - position_offset;
 }
 
-float get_speed_ticks_per_second() {
-	static int32_t previous_rel_pos = 0;
-	static uint32_t previous_tick_time = 0;
-	static bool first_call = true; // Handle the very first execution
+float get_motor_speed() {
+    static int32_t previous_pos = 0;
+    static uint32_t previous_tick_time = 0;
+    static bool first_call = true;
 
-	int32_t current_rel_pos = get_rel_motor_pos();
-	uint32_t current_tick_time = HAL_GetTick(); // Time in milliseconds
+    int32_t current_pos = get_motor_pos();
+    uint32_t current_tick_time = HAL_GetTick();
 
-	if (first_call) {
-		previous_rel_pos = current_rel_pos;
-		previous_tick_time = current_tick_time;
-		first_call = false;
-		return 0.0f;
-	}
+    if (first_call) {
+        previous_pos = current_pos;
+        previous_tick_time = current_tick_time;
+        first_call = false;
+        return 0.0f;
+    }
 
-	uint32_t delta_time_ms = current_tick_time - previous_tick_time;
-	int32_t delta_position = current_rel_pos - previous_rel_pos;
+    uint32_t delta_time_ms = current_tick_time - previous_tick_time;
+    int32_t delta_position = current_pos - previous_pos;
 
-	if (delta_time_ms == 0) {
-		return 0.0f;
-	}
+    previous_pos = current_pos;
+    previous_tick_time = current_tick_time;
 
-	float delta_time_s = (float)delta_time_ms / 1000.0f;
-	float speed_ticks_per_s = (float)delta_position / delta_time_s;
+    if (delta_time_ms == 0) {
+        return 0.0f;
+    }
 
-	    // Update state for the next call
-	previous_rel_pos = current_rel_pos;
-	previous_tick_time = current_tick_time;
-
-	return speed_ticks_per_s;
+    float speed = (float)delta_position / (float)delta_time_ms;
+    return speed;
 }
 
 void loop_1ms() {
 	if (IDLE == MC_GetSTMStateMotor1()) {
-		MC_ProgramTorqueRampMotor1(1, 500);
+		MC_ProgramTorqueRampMotor1(1, 0);
 		MC_StartMotor1();
 	}
-
 	double torque_command = 0;
-	int32_t position_error = get_rel_motor_pos();
-	float curr_speed = get_speed_ticks_per_second();
+	float position_error = (float)get_motor_pos() * COUNTS_TO_DEG;
+	float curr_speed = get_motor_speed() * SPEED_SCALE_DEG;
+
+	static uint32_t counter = 0;
+
 	if (MC_GetSTMStateMotor1() == RUN) {
 		torque_command = 0;
-
 		if(position_error > RAMP_WIDTH) {
 			if (control_type == CONSTANT) {
 				torque_command = -torque_setpoint;
@@ -353,27 +341,64 @@ void loop_1ms() {
 			} else if (position_error < -DEADBAND_WIDTH) {
 				torque_command = ((float)(fabsf(position_error)-DEADBAND_WIDTH)/(RAMP_WIDTH-DEADBAND_WIDTH)) * torque_setpoint;
 			} else {
-				//torque_command = 0.0002 * (double)curr_speed;
-				float speed_threshold = 50.0f; // Ticks per second - TUNE THIS
+				float speed_threshold = 3.0f; // Ticks per second - TUNE THIS
 				if (fabsf(curr_speed) < speed_threshold && abs(position_error) < (DEADBAND_WIDTH / 4)) {
 				   // If speed is very low AND we are very close to the center, do nothing.
 				   torque_command = 0.0f;
 				} else {
 				  // Otherwise, apply damping
-				  torque_command = -0.0002 * curr_speed; // Use your damping gain Kd
+				  torque_command = -0.005 * curr_speed; // Use your damping gain Kd
 				}
 			}
 		}
 		if (torque_command > 1.5) {
 			torque_command = 1.5;
+		} else if (torque_command < -1.5) {
+			torque_command = -1.5;
 		}
-		MC_ProgramTorqueRampMotor1_F(torque_command, 0);
+		if (++counter >= 20) {
+			counter = 0;
+			debug_position = position_error;
+			debug_speed = curr_speed;
+			debug_torque = torque_command;
+			debug_ready = true;
+		}
+		MC_ProgramTorqueRampMotor1_F(torque_command * (double)direction_correction, 0);
 	}
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if (htim->Instance == TIM6) {
 		loop_1ms();
+	}
+}
+
+int16_t detect_motor_direction(void) {
+	float test_torque = 0.5;
+	uint32_t test_duration_ms = 50;
+	uint32_t timeout = 5000;
+	int32_t threshhold = 500;
+	while (MC_GetSTMStateMotor1() != RUN && timeout > 0) {
+		HAL_Delay(1);
+		timeout--;
+	}
+	if (MC_GetSTMStateMotor1() != RUN) {
+		return 1; // no change
+	}
+	int32_t initial_pos = get_motor_pos();
+	MC_ProgramTorqueRampMotor1_F(test_torque, 0);
+	HAL_Delay(test_duration_ms);
+	int32_t final_pos = get_motor_pos();
+	MC_ProgramTorqueRampMotor1_F(0, 0);
+	HAL_Delay(50);
+	int32_t delta = final_pos - initial_pos;
+	if (delta <-threshhold) {
+		return -1;
+	}
+	else if (delta > threshhold) {
+		return 1;
+	} else {
+		return 1;
 	}
 }
 
@@ -409,12 +434,21 @@ int main(void) {
 	/* Initialize interrupts */
 	MX_NVIC_Init();
 	HAL_UART_Receive_IT(&huart2, &rx_char, 1);
-	HAL_TIM_Base_Start_IT(&htim6);
 	torque_setpoint = 0;
 	control_type = SPRING;
+	if (IDLE == MC_GetSTMStateMotor1()) {
+		MC_ProgramTorqueRampMotor1(0.3, 0);
+		MC_StartMotor1();
+	}
+	direction_correction = detect_motor_direction();
+	HAL_TIM_Base_Start_IT(&htim6);
 	while (1) {
 		if (command_ready) {
 			handle_command();
+		}
+		if (debug_ready) {
+			debug_ready = false;
+			//printf("Pos:%f, Sp:%f, Tor:%f, MotorState:%d \n", debug_position, debug_speed, debug_torque, MC_GetSTMStateMotor1());
 		}
 	}
 }
