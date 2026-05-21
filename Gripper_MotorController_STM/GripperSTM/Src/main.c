@@ -319,52 +319,71 @@ void loop_1ms() {
 	float position_error = (float)get_motor_pos() * COUNTS_TO_DEG;
 	float curr_speed = get_motor_speed() * SPEED_SCALE_DEG;
 
-	static uint32_t counter = 0;
-
+	uint32_t counter = 0;
 	if (MC_GetSTMStateMotor1() == RUN) {
-		torque_command = 0;
-		if(position_error > RAMP_WIDTH) {
-			if (control_type == CONSTANT) {
-				torque_command = -torque_setpoint;
-			} else {
-				torque_command = -torque_setpoint * position_error;
-			}
-		} else if (position_error < -RAMP_WIDTH) {
-			if (control_type == CONSTANT) {
-				torque_command = torque_setpoint;
-			} else {
-				torque_command = -torque_setpoint * position_error;
-			}
-		} else {
-			if (position_error > DEADBAND_WIDTH) {
-				torque_command = ((float)(position_error-DEADBAND_WIDTH)/(RAMP_WIDTH-DEADBAND_WIDTH)) * -torque_setpoint;
-			} else if (position_error < -DEADBAND_WIDTH) {
-				torque_command = ((float)(fabsf(position_error)-DEADBAND_WIDTH)/(RAMP_WIDTH-DEADBAND_WIDTH)) * torque_setpoint;
-			} else {
-				float speed_threshold = 3.0f; // Ticks per second - TUNE THIS
-				if (fabsf(curr_speed) < speed_threshold && abs(position_error) < (DEADBAND_WIDTH / 4)) {
-				   // If speed is very low AND we are very close to the center, do nothing.
-				   torque_command = 0.0f;
-				} else {
-				  // Otherwise, apply damping
-				  torque_command = -0.005 * curr_speed; // Use your damping gain Kd
-				}
-			}
-		}
-		if (torque_command > 1.5) {
-			torque_command = 1.5;
-		} else if (torque_command < -1.5) {
-			torque_command = -1.5;
-		}
-		if (++counter >= 20) {
-			counter = 0;
-			debug_position = position_error;
-			debug_speed = curr_speed;
-			debug_torque = torque_command;
-			debug_ready = true;
-		}
-		MC_ProgramTorqueRampMotor1_F(torque_command * (double)direction_correction, 0);
+
+	    float position_error = (float)get_motor_pos() * COUNTS_TO_DEG;
+	    float speed = get_motor_speed() * SPEED_SCALE_DEG;
+
+	    float kp = torque_setpoint;   // spring stiffness
+	    float kd = 0.003f;            // damping (tune this 0.001–0.01)
+
+	    float torque_command = 0.0f;
+
+	    // Spring-damper behavior
+	    torque_command = -kp * position_error - kd * speed;
+
+	    // Safety clamp
+	    if (torque_command > 1.5f) torque_command = 1.5f;
+	    if (torque_command < -1.5f) torque_command = -1.5f;
+
+	    MC_ProgramTorqueRampMotor1_F(torque_command * (double)direction_correction, 0);
 	}
+// OLD VERSION OF THE SPRING LOOP
+//	if (MC_GetSTMStateMotor1() == RUN) {
+//		torque_command = 0;
+//		if(position_error > RAMP_WIDTH) {
+//			if (control_type == CONSTANT) {
+//				torque_command = -torque_setpoint;
+//			} else {
+//				torque_command = -torque_setpoint * position_error;
+//			}
+//		} else if (position_error < -RAMP_WIDTH) {
+//			if (control_type == CONSTANT) {
+//				torque_command = torque_setpoint;
+//			} else {
+//				torque_command = -torque_setpoint * position_error;
+//			}
+//		} else {
+//			if (position_error > DEADBAND_WIDTH) {
+//				torque_command = ((float)(position_error-DEADBAND_WIDTH)/(RAMP_WIDTH-DEADBAND_WIDTH)) * -torque_setpoint;
+//			} else if (position_error < -DEADBAND_WIDTH) {
+//				torque_command = ((float)(fabsf(position_error)-DEADBAND_WIDTH)/(RAMP_WIDTH-DEADBAND_WIDTH)) * torque_setpoint;
+//			} else {
+//				float speed_threshold = 3.0f; // Ticks per second - TUNE THIS
+//				if (fabsf(curr_speed) < speed_threshold && abs(position_error) < (DEADBAND_WIDTH / 4)) {
+//				   // If speed is very low AND we are very close to the center, do nothing.
+//				   torque_command = 0.0f;
+//				} else {
+//				  // Otherwise, apply damping
+//				  torque_command = -0.005 * curr_speed; // Use your damping gain Kd
+//				}
+//			}
+//		}
+//		if (torque_command > 1.5) {
+//			torque_command = 1.5;
+//		} else if (torque_command < -1.5) {
+//			torque_command = -1.5;
+//		}
+//		if (++counter >= 20) {
+//			counter = 0;
+//			debug_position = position_error;
+//			debug_speed = curr_speed;
+//			debug_torque = torque_command;
+//			debug_ready = true;
+//		}
+//		MC_ProgramTorqueRampMotor1_F(torque_command * (double)direction_correction, 0);
+//	}
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
@@ -448,9 +467,14 @@ int main(void) {
 		}
 		if (debug_ready) {
 			debug_ready = false;
-			//printf("Pos:%f, Sp:%f, Tor:%f, MotorState:%d \n", debug_position, debug_speed, debug_torque, MC_GetSTMStateMotor1());
+//			printf("Pos:%f, Sp:%f, Tor:%f, MotorState:%d \n", debug_position, debug_speed, debug_torque, MC_GetSTMStateMotor1());
 		}
 	}
+//	while (1) {
+//	    printf("%ld\n", TIM4->CNT);
+//	    HAL_Delay(5);
+//	}
+
 }
 
 /**
