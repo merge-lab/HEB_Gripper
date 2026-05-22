@@ -45,6 +45,7 @@
 
 
 #include "Arduino.h"
+#include "forte.h"
 
 #define RXD2 16
 #define TXD2 17
@@ -67,7 +68,7 @@ void setup() {
 void loop() {
     // small constant "spring stiffness"
     // increase/decrease this to feel stiffness
-    float k = 0.04;
+    float k = 0.3;
 
     Serial2.printf("t %f\n", k);
 
