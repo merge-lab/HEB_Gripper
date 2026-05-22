@@ -63,6 +63,8 @@ void setup() {
     delay(200);
 
     Serial.println("Sending spring torque loop...");
+
+    ForteFinger x (1, 2, 3, "hi");
 }
 
 void loop() {
