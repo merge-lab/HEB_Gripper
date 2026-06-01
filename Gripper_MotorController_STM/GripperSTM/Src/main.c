@@ -310,35 +310,105 @@ float get_motor_speed() {
     return speed;
 }
 
-void loop_1ms() {
-	if (IDLE == MC_GetSTMStateMotor1()) {
-		MC_ProgramTorqueRampMotor1(1, 0);
-		MC_StartMotor1();
-	}
-	double torque_command = 0;
-	float position_error = (float)get_motor_pos() * COUNTS_TO_DEG;
-	float curr_speed = get_motor_speed() * SPEED_SCALE_DEG;
+void loop_1ms()
+{
+    if (IDLE == MC_GetSTMStateMotor1()) {
+        MC_ProgramTorqueRampMotor1(0, 0);
+        MC_StartMotor1();
+        return;
+    }
 
-	uint32_t counter = 0;
-	if (MC_GetSTMStateMotor1() == RUN) {
+    if (MC_GetSTMStateMotor1() != RUN) {
+        return;
+    }
 
-	    float position_error = (float)get_motor_pos() * COUNTS_TO_DEG;
-	    float speed = get_motor_speed() * SPEED_SCALE_DEG;
+    /* ----- Position ----- */
 
-	    float kp = torque_setpoint;   // spring stiffness
-	    float kd = 0.003f;            // damping (tune this 0.001–0.01)
+    float pos_deg = (float)get_motor_pos() * COUNTS_TO_DEG;
 
-	    float torque_command = 0.0f;
+    /* ----- Velocity ----- */
 
-	    // Spring-damper behavior
-	    torque_command = -kp * position_error - kd * speed;
+    static float speed_filt = 0.0f;
 
-	    // Safety clamp
-	    if (torque_command > 1.5f) torque_command = 1.5f;
-	    if (torque_command < -1.5f) torque_command = -1.5f;
+    float raw_speed = get_motor_speed() * SPEED_SCALE_DEG;
 
-	    MC_ProgramTorqueRampMotor1_F(torque_command * (double)direction_correction, 0);
-	}
+    // 20 Hz-ish low pass at 1 kHz loop rate
+    speed_filt =
+        0.98f * speed_filt +
+        0.02f * raw_speed;
+
+    /* ----- Tunable gains ----- */
+
+    float kp = torque_setpoint;     // spring stiffness
+    float kd = 0.004f;             // damping
+
+    /* ----- Deadband ----- */
+
+    const float pos_deadband = 0.10f;   // degrees
+    const float vel_deadband = 0.50f;   // deg/s
+
+    float spring_error = pos_deg;
+
+    if (fabsf(pos_deg) < pos_deadband) {
+        spring_error = 0.0f;
+    }
+    else {
+        // smooth transition out of deadband
+        if (pos_deg > 0)
+            spring_error -= pos_deadband;
+        else
+            spring_error += pos_deadband;
+    }
+
+    /* ----- Spring-Damper ----- */
+
+    float torque_command;
+
+    if (fabsf(pos_deg) < pos_deadband &&
+        fabsf(speed_filt) < vel_deadband)
+    {
+        torque_command = 0.0f;
+    }
+    else
+    {
+
+        torque_command =
+            kp * spring_error
+            -kd * speed_filt;
+    }
+
+    /* ----- Torque LPF ----- */
+
+    static float torque_filt = 0.0f;
+
+    torque_filt =
+        0.90f * torque_filt +
+        0.10f * torque_command;
+
+    /* ----- Saturation ----- */
+
+    if (torque_filt > 1.5f)
+        torque_filt = 1.5f;
+
+    if (torque_filt < -1.5f)
+        torque_filt = -1.5f;
+
+    MC_ProgramTorqueRampMotor1_F(
+        torque_filt * (float)direction_correction,
+        0);
+
+    /* ----- Debug ----- */
+
+    static uint32_t counter = 0;
+
+    if (++counter >= 20) {
+        counter = 0;
+
+        debug_position = pos_deg;
+        debug_speed = speed_filt;
+        debug_torque = torque_filt;
+        debug_ready = true;
+    }
 // OLD VERSION OF THE SPRING LOOP
 //	if (MC_GetSTMStateMotor1() == RUN) {
 //		torque_command = 0;
@@ -460,6 +530,10 @@ int main(void) {
 		MC_StartMotor1();
 	}
 	direction_correction = detect_motor_direction();
+
+	/* Set current handle position as spring center */
+	position_offset = (int32_t)ENCODER_M1._Super.hMecAngle;
+
 	HAL_TIM_Base_Start_IT(&htim6);
 	while (1) {
 		if (command_ready) {

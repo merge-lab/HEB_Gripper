@@ -70,7 +70,7 @@ void setup() {
 void loop() {
     // small constant "spring stiffness"
     // increase/decrease this to feel stiffness
-    float k = 0.3;
+    float k = 1.5;
 
     Serial2.printf("t %f\n", k);
 
