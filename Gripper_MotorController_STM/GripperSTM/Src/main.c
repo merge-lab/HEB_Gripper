@@ -529,7 +529,7 @@ int main(void) {
 		MC_ProgramTorqueRampMotor1(0.3, 0);
 		MC_StartMotor1();
 	}
-	direction_correction = detect_motor_direction();
+	direction_correction = -detect_motor_direction();
 
 	/* Set current handle position as spring center */
 	position_offset = (int32_t)ENCODER_M1._Super.hMecAngle;

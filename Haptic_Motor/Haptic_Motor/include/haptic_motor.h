@@ -22,7 +22,10 @@ class HapticMotor
 {
 public:
 private:
-    SemaphoreHandle_t data_ready = NULL;
+    SemaphoreHandle_t data_ready = NULL;    // what it sounds like
+    const int BUFFER_SIZE;                  // size of the buffer used. 128 is a good default
+    char buffer;                            // the actual data buffer
+    volatile size_t rx_line_length = 0;     // 
 
     // helper methods from the original version
     void init_communication(HardwareSerial *serial);

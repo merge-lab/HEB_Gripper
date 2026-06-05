@@ -51,20 +51,18 @@
 #define TXD2 17
 
 void setup() {
-    Serial.begin(115200);
+    // Serial.begin(115200);
     Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
 
     delay(1500);
 
-    Serial.println("Setting SPRING mode...");
+    // Serial.println("Setting SPRING mode...");
 
     // Set spring mode ONCE
     Serial2.print("m 1\n");
     delay(200);
 
-    Serial.println("Sending spring torque loop...");
-
-    ForteFinger x (1, 2, 3, "hi");
+    // Serial.println("Sending spring torque loop...");
 }
 
 void loop() {
