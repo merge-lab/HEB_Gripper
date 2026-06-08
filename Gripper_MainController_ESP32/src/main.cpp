@@ -1,6 +1,7 @@
 #include "Arduino.h"
 #include "forte.h"
 #include "Wifi_Comms.h"
+#include <FT_Device.h>
 
 #define RXD2 16
 #define TXD2 17
