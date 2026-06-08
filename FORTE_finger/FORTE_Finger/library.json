@@ -1,6 +1,0 @@
-{
-  "name": "ForteFinger",
-  "version": "1.0.0",
-  "description": "Sensor wrapper for FORTE finger ADC system",
-  "frameworks": ["arduino"]
-}

@@ -1,0 +1,6 @@
+{
+  "name": "FT_Device",
+  "version": "1.0.0",
+  "description": "Wrapper for FT_Sensor device in terms of FT_Sensor.h",
+  "frameworks": ["arduino"]
+}

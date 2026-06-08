@@ -9,7 +9,7 @@ public:
     /*
     Simple constructor for ESP32
     assumes: ESP32, min_voltage = ~0.165v, max_voltage = ~2.805v  
-    input:
+    Input:
         pin     - integer pin used for the sensor
         id      - string name of the sensor
     */
@@ -18,12 +18,12 @@ public:
     /*
     Full constructor for any board
     Input:
-    pin         - integer pin used for the sensor
-    id          - name of this sensor
-    ref_volt    - reference voltage of this board's ADC
-    res         - resolution of this board's ADC
-    minVolt     - min possible voltage of the reading
-    maxVolt     - max possible voltage of the reading
+        pin         - integer pin used for the sensor
+        id          - name of this sensor
+        ref_volt    - reference voltage of this board's ADC
+        res         - resolution of this board's ADC
+        minVolt     - min possible voltage of the reading
+        maxVolt     - max possible voltage of the reading
     */
     FT_Sensor(int pin, String id, float ref_volt, int res, float minVolt, float maxVolt);
 
