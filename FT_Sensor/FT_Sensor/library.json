@@ -1,0 +1,6 @@
+{
+  "name": "FT_Sensor",
+  "version": "1.0.0",
+  "description": "Sensor wrapper for FT sensor",
+  "frameworks": ["arduino"]
+}
