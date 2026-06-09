@@ -9,57 +9,34 @@ class FT_Device
 {
 public:
     /*
-    Simple constructor for ESP32
-    assumes: ESP32, min_voltage = ~0.165v, max_voltage = ~2.805v  
-    Input:
-        sensorPins{}     - sensor pin list
-        id               - string name of the device
+    Constructor
+    Input: name - the name of this device
     */
-    FT_Device(std::initializer_list<int> sensorPins, String id);
+    FT_Device(const char* name) : name(name){}
+    
+    /* Destructor */
+    ~FT_Device(){for(FT_Sensor* s : sensors) { delete s; }}
+
+    /* Disable copying */
+    FT_Device(const FT_Device&) = delete;
+    FT_Device& operator=(const FT_Device&) = delete;
 
     /*
-    Full constructor for any board
-    Input:
-        sensorPins{}    - sensor pin list
-        id              - name of this sensor
-        ref_volt        - reference voltage of this board's ADC
-        res             - resolution of this board's ADC
-        minVolt         - min possible voltage of the reading
-        maxVolt         - max possible voltage of the reading
+    Adds a new analog sensor such as L01D
     */
-    FT_Device(std::initializer_list<int> sensorPins, String id,
-        float ref_volt, int res, float minVolt, float maxVolt);
-
+    void add_analog_sensor(int id, int pin, float refV, int adcR, float minV, float maxV, 
+        float offset, float scale)
+    {
+        sensors.push_back(new AnalogSensor(id, pin, refV, adcR, minV, maxV, offset, scale));
+    }
 
     /*
-    Returns the pressure of sensor i, accessed in order of creation list
-    Input: 
-        int i - index of desired sensor in initialization list
-    Output: 
-        float pressure reading on sensor i in inH20
-        -1 if invalid sensor number
+    Adds a new digital sensor such as L10D or L30D
     */
-    float get_sensor_pressure(int pin_number) const;
-
-    /*
-    get pressure of all sensors
-    Input: None
-    Output:
-        vectr<float> of all sensor's pressures in order of initialization in inH20
-    */
-    std::vector<float> get_all_pressures() const;
-
 
 private:
-    const int NUM_SENSORS;      // number of sensors on board
-    const float ADC_REF_VOLT;   // reference voltage for the ADC, 3.3 for ESP32
-    const int ADC_RES;          // adc resolution, 4095 for ESP32
-    const float ADC_FACTOR;     // calculated from voltage and resolution
-    const float MIN_VOLTAGE;    // obtained via calibration
-    const float MAX_VOLTAGE;    // obtained via calibration
-    const String ID;            // id of this FT_Device
-    std::vector<FT_Sensor> sensors;     // vector of sensors
-
+    const char* name;                           // name of this device
+    std::vector<FT_Sensor*> sensors;            // sensors on this device
 };
 
 #endif

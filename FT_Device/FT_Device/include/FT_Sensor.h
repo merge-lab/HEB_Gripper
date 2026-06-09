@@ -25,6 +25,13 @@ public:
     Returns sensor pressure in inH20
     */
     virtual float get_pressure() const = 0;
+
+    /*
+    Returns the sensor id
+    Input: None
+    Output: int assigned sensor id
+    */
+    virtual int get_ID() const{ return ID; }
 };
 
 /*
