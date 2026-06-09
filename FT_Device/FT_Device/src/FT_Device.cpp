@@ -37,42 +37,22 @@ FT_Device::FT_Device(std::initializer_list<int> sensorPins, String id,
     }
 }
 
-int FT_Device::get_sensor_raw_value(int pin_number)
+float FT_Device::get_sensor_pressure(int pin_number) const
 {
     // error if invalid pin number
-    if(pin_number < 0 || pin_number > NUM_SENSORS){return -1;}
+    if(pin_number < 0 || pin_number >= NUM_SENSORS){return -1;}
 
-    return sensors[pin_number].get_raw_value();
+    return sensors[pin_number].get_pressure();
 }
 
-float FT_Device::get_sensor_voltage(int pin_number)
-{
-    // error if invalid pin number
-    if(pin_number < 0 || pin_number > NUM_SENSORS){return -1;}
-
-    return sensors[pin_number].get_sensor_voltage();
-}
-
-std::vector<int> FT_Device::get_all_raw_values()
-{
-    std::vector<int> readings;
-    readings.reserve(sensors.size());
-
-    for (FT_Sensor sensor : sensors) {
-        readings.push_back(sensor.get_raw_value());
-    }
-
-    return readings;
-}
-
-std::vector<float> FT_Device::get_all_voltages()
+std::vector<float> FT_Device::get_all_pressures() const
 {
     std::vector<float> readings;
     readings.reserve(sensors.size());
 
-    for (FT_Sensor sensor : sensors) {
-        readings.push_back(sensor.get_sensor_voltage());
+    for (const FT_Sensor& sensor : sensors) {
+        readings.push_back(sensor.get_pressure());
     }
 
-    return readings; 
+    return readings;
 }

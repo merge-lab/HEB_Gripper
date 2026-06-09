@@ -30,41 +30,25 @@ public:
     FT_Device(std::initializer_list<int> sensorPins, String id,
         float ref_volt, int res, float minVolt, float maxVolt);
 
+
     /*
-    Raw adc value of sensor i, accessed in order of creation list
+    Returns the pressure of sensor i, accessed in order of creation list
     Input: 
         int i - index of desired sensor in initialization list
     Output: 
-        int adc reading of sensor i
+        float pressure reading on sensor i in inH20
         -1 if invalid sensor number
     */
-    int get_sensor_raw_value(int pin_number);
+    float get_sensor_pressure(int pin_number) const;
 
     /*
-    Calculated voltage of sensor i, accessed in order of creation list
-    Input: 
-        int i - index of desired sensor in initialization list
-    Output: 
-        int adc reading of sensor i
-        -1 if invalid sensor number
-    */
-    float get_sensor_voltage(int pin_number);
-
-    /*
-    get raw adc values of all the sensors
+    get pressure of all sensors
     Input: None
     Output:
-        vector<integer> raw adc val of all sensors in order of initialization
+        vectr<float> of all sensor's pressures in order of initialization in inH20
     */
-    std::vector<int> get_all_raw_values();
+    std::vector<float> get_all_pressures() const;
 
-    /*
-    get sensor voltages of all the sensors
-    Input: None
-    Output:
-        vector<float> voltage of all the sensors in order of initialization
-    */
-    std::vector<float> get_all_voltages();
 
 private:
     const int NUM_SENSORS;      // number of sensors on board
