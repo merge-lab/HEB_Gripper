@@ -3,8 +3,6 @@
 
 #include <Wire.h>
 #include <Arduino.h>
-#include <cfloat>
-#include <climits>
 #include <math.h>
 
 /* 
