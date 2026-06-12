@@ -241,9 +241,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.force = deque(maxlen=MAX_STORED_POINTS)
         self.force_curve = None
 
-        # =========================
-        # ADDED ONLY (Hz tracking)
-        # =========================
         self.last_hz_time = time.perf_counter()
         self.last_sample_count = 0
         self.current_hz = 0.0
@@ -264,7 +261,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update_from_queue)
         self.timer.start(GUI_REFRESH_MS)
 
-    # -------------------------
     def _build_ui(self):
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -277,10 +273,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.pause_button.setCheckable(True)
 
         self.status_label = QtWidgets.QLabel("Waiting...")
-
-        # =========================
-        # ADDED ONLY (Hz label)
-        # =========================
         self.hz_label = QtWidgets.QLabel("Hz: --")
 
         layout.addWidget(self.horizon_box)
@@ -308,7 +300,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
 
-    # -------------------------
     def init_channels(self, n):
         self.channels = [deque(maxlen=MAX_STORED_POINTS) for _ in range(n)]
 
@@ -318,10 +309,12 @@ class SerialPlotter(QtWidgets.QMainWindow):
             self.channel_layout.addWidget(cb)
             self.checkboxes.append(cb)
 
-            curve = self.plot_top.plot(name=f"T{i}")
+            # ONLY CHANGE: assign unique color per sensor
+            pen = pg.intColor(i, hues=n)
+            curve = self.plot_top.plot(name=f"T{i}", pen=pen)
+
             self.curves.append(curve)
 
-    # -------------------------
     def update_from_queue(self):
         if self.pause_button.isChecked():
             return
@@ -363,9 +356,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
                 for i, v in enumerate(vals):
                     self.channels[i].append(v)
 
-        # =========================
-        # ADDED ONLY (Hz update)
-        # =========================
         now = time.perf_counter()
         dt = now - self.last_hz_time
 
@@ -379,7 +369,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
         self.redraw()
 
-    # -------------------------
     def redraw(self):
         if len(self.times) < 2:
             return
@@ -394,20 +383,17 @@ class SerialPlotter(QtWidgets.QMainWindow):
         step = max(1, len(t_view) // MAX_DISPLAY_POINTS) if len(t_view) > MAX_DISPLAY_POINTS else 1
         t_view = t_view[::step]
 
-        # sensors
         for i, c in enumerate(self.curves):
             y = np.array(self.channels[i])
             c.setData(t_view, y[mask][::step])
 
         self.plot_top.setXRange(t0, t[-1])
 
-        # force
         if self.has_force and self.force_curve:
             f = np.array(self.force)
             self.force_curve.setData(t_view, f[mask][::step])
             self.plot_bottom.setXRange(t0, t[-1])
 
-    # -------------------------
     def closeEvent(self, event):
         self.stop_event.set()
         if self.proc.is_alive():
