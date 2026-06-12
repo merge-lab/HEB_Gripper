@@ -1,37 +1,207 @@
-#include "Arduino.h"
-#include "forte.h"
-#include "Wifi_Comms.h"
-#include <FT_Device.h>
+// ESP32 Arduino code
+// 6 tactile channels @ 1000 Hz
+// Regressor updates @ 100 Hz
+// Fake Ridge / fake MLP weights for hookup testing
+// No extra library needed
+#include <Arduino.h>
 
-#define RXD2 16
-#define TXD2 17
+const int numSensors = 6;
+const int sensorPins[numSensors] = {4, 5, 6, 8, 9, 10};
+
+// =========================
+// Choose regressor here
+// =========================
+// Ridge:
+#define USE_RIDGE 1
+#define USE_MLP   0
+
+// MLP:
+// #define USE_RIDGE 0
+// #define USE_MLP   1
+
+// =========================
+// ADC settings
+// =========================
+const float refVoltage    = 3.3;
+const int   adcResolution = 4095;
+const float adcFactor = refVoltage / (float)adcResolution;
+
+const float Vs = 3.0;
+const float minVoltage = 0.1 * Vs;
+const float maxVoltage = 0.9 * Vs;
+
+// =========================
+// Timing
+// =========================
+const unsigned long sensorIntervalMicros = 1000;  // 1000 Hz sensor read
+const int regressorEveryN = 10;                   // 100 Hz regressor update
+
+int sampleCounter = 0;
+
+// =========================
+// Sensor data
+// =========================
+int raw[numSensors];
+float mapped[numSensors];
+
+float forceOutput = 0.0;
+
+// ======================================================
+// Fake Ridge regressor
+// force = bias + w1*T1 + ... + w6*T6
+// ======================================================
+
+float ridgeBias = 0.5;
+
+float ridgeW[numSensors] = {
+  1.0,
+  2.0,
+  3.0,
+  4.0,
+  5.0,
+  6.0
+};
+
+float ridgePredict(const float x[numSensors]) {
+  float y = ridgeBias;
+
+  for (int i = 0; i < numSensors; i++) {
+    y += ridgeW[i] * x[i];
+  }
+
+  return y;
+}
+
+// ======================================================
+// Fake TinyML MLP regressor
+// Architecture: 6 -> 8 -> 1
+// ======================================================
+
+const int hiddenSize = 8;
+
+float W1[hiddenSize][numSensors] = {
+  { 1.0,  0.0,  0.0,  0.0,  0.0,  0.0},
+  { 0.0,  1.0,  0.0,  0.0,  0.0,  0.0},
+  { 0.0,  0.0,  1.0,  0.0,  0.0,  0.0},
+  { 0.0,  0.0,  0.0,  1.0,  0.0,  0.0},
+  { 0.0,  0.0,  0.0,  0.0,  1.0,  0.0},
+  { 0.0,  0.0,  0.0,  0.0,  0.0,  1.0},
+  { 0.5,  0.5,  0.5,  0.5,  0.5,  0.5},
+  {-0.5, -0.5, -0.5, -0.5, -0.5, -0.5}
+};
+
+float b1[hiddenSize] = {
+  0.1,
+  0.2,
+  0.3,
+  0.4,
+  0.5,
+  0.6,
+  0.0,
+  0.0
+};
+
+float W2[hiddenSize] = {
+  0.4,
+  0.6,
+  0.8,
+  1.0,
+  1.2,
+  1.4,
+  0.5,
+ -0.3
+};
+
+float b2 = 0.25;
+
+float relu(float v) {
+  return v > 0.0 ? v : 0.0;
+}
+
+float mlpPredict(const float x[numSensors]) {
+  float h[hiddenSize];
+
+  for (int i = 0; i < hiddenSize; i++) {
+    float sum = b1[i];
+
+    for (int j = 0; j < numSensors; j++) {
+      sum += W1[i][j] * x[j];
+    }
+
+    h[i] = relu(sum);
+  }
+
+  float y = b2;
+
+  for (int i = 0; i < hiddenSize; i++) {
+    y += W2[i] * h[i];
+  }
+
+  return y;
+}
+
+// ======================================================
+// Unified prediction function
+// ======================================================
+
+float predictForce(const float x[numSensors]) {
+#if USE_RIDGE
+  return ridgePredict(x);
+#elif USE_MLP
+  return mlpPredict(x);
+#else
+  return 0.0;
+#endif
+}
 
 void setup() {
-    // Serial.begin(115200);
-    Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
-
-    delay(1500);
-
-    // Serial.println("Setting SPRING mode...");
-
-    // Set spring mode ONCE
-    Serial2.print("m 1\n");
-    delay(200);
-
-    // Serial.println("Sending spring torque loop...");
+  Serial.begin(2000000);
+  delay(500);
 }
 
 void loop() {
-    // small constant "spring stiffness"
-    // increase/decrease this to feel stiffness
-    float k = 1.5;
+  unsigned long loopStart = micros();
 
-    Serial2.printf("t %f\n", k);
+  // =========================
+  // Read sensors @ 1000 Hz
+  // =========================
+  for (int i = 0; i < numSensors; i++) {
+    raw[i] = analogRead(sensorPins[i]);
+  }
 
-    // print any STM32 responses
-    while (Serial2.available()) {
-        Serial.write(Serial2.read());
-    }
+  // =========================
+  // Convert ADC to mapped values
+  // =========================
+  for (int i = 0; i < numSensors; i++) {
+    mapped[i] = (((raw[i] * adcFactor) - minVoltage) /
+                 (maxVoltage - minVoltage)) * 4.0 - 2.0;
+  }
 
-    delay(20);  // 50 Hz update rate
+  // =========================
+  // Update force @ 100 Hz
+  // =========================
+  if (sampleCounter % regressorEveryN == 0) {
+    forceOutput = predictForce(mapped);
+  }
+
+  sampleCounter++;
+
+  // =========================
+  // Print every loop
+  // Force repeats between 100 Hz updates
+  // =========================
+  Serial.printf(
+    "T1:%.3f,T2:%.3f,T3:%.3f,T4:%.3f,T5:%.3f,T6:%.3f,Force:%.3f\n",
+    mapped[0], mapped[1], mapped[2],
+    mapped[3], mapped[4], mapped[5],
+    forceOutput);
+
+  // =========================
+  // Maintain 1000 Hz loop
+  // =========================
+  unsigned long elapsed = micros() - loopStart;
+
+  if (elapsed < sensorIntervalMicros) {
+    delayMicroseconds(sensorIntervalMicros - elapsed);
+  }
 }

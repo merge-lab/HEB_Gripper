@@ -1,6 +1,0 @@
-{
-  "name": "FT_Device",
-  "version": "1.1.0",
-  "description": "FT_Sensors and FT_Device wrapper",
-  "frameworks": ["arduino"]
-}
