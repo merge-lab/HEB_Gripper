@@ -273,7 +273,7 @@ class SerialPlotter(QtWidgets.QMainWindow):
                 _, t, y, line = msg
 
                 if not self.channels:
-                    self.init_channels(len(y[0]) - 1 if "Force" in line else len(y[0]))
+                    self.init_channels(6)
 
                 for ti, vals in zip(t, y):
                     self.times.append(ti)
