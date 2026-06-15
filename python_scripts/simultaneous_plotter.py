@@ -1,6 +1,6 @@
 import sys
 import time
-import threading
+import queue
 import multiprocessing as mp
 from collections import deque
 
@@ -12,14 +12,10 @@ from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 
 
-# =========================
-# Settings
-# =========================
 PRESSURE_BAUD = 1000000
 LOADCELL_BAUD = 115200
 
 BATCH_SIZE = 5
-
 GUI_REFRESH_MS = 10
 
 PLOT_WINDOW_SEC = 20
@@ -30,37 +26,7 @@ LOG_DT = 1.0 / LOG_HZ
 
 pg.setConfigOptions(antialias=False)
 
-"""
-Warning: Ignoring XDG_SESSION_TYPE=wayland on Gnome. Use QT_QPA_PLATFORM=wayland to run on Wayland anyway.
-Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 355, in <module>
-    main()
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 347, in main
-    w = Plotter(p, l)
-        ^^^^^^^^^^^^^
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 207, in __init__
-    self.p_proc.start()
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/process.py", line 121, in start
-    self._popen = self._Popen(self)
-                  ^^^^^^^^^^^^^^^^^
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/context.py", line 224, in _Popen
-    return _default_context.get_context().Process._Popen(process_obj)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
-    return Popen(process_obj)
-           ^^^^^^^^^^^^^^^^^^
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
-    super().__init__(process_obj)
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
-    self._launch(process_obj)
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 47, in _launch
-    reduction.dump(process_obj, fp)
-  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/reduction.py", line 60, in dump
-    ForkingPickler(file, protocol).dump(obj)
-TypeError: cannot pickle '_thread.lock' object
-"""
-# =========================
-# Parser
+
 # =========================
 def parse_line(line: str):
     vals = []
@@ -78,43 +44,7 @@ def parse_line(line: str):
 
 
 # =========================
-# Shared system state (CRITICAL)
-# =========================
-class SystemState:
-    def __init__(self):
-        self.lock = threading.Lock()
-
-        self.t0 = time.perf_counter()
-
-        self.t = 0.0
-        self.pressure = [0.0] * 6
-        self.force = 0.0
-        self.loadcell = 0.0
-
-    def update_pressure(self, vals):
-        with self.lock:
-            self.pressure = vals[:6]
-            self.force = vals[6]
-            self.t = time.perf_counter() - self.t0
-
-    def update_loadcell(self, v):
-        with self.lock:
-            self.loadcell = v
-
-    def snapshot(self):
-        with self.lock:
-            return {
-                "t": self.t,
-                "p": self.pressure.copy(),
-                "f": self.force,
-                "l": self.loadcell
-            }
-
-
-# =========================
-# Pressure worker
-# =========================
-def pressure_worker(port, baud, state, stop):
+def pressure_worker(port, baud, q, stop):
     ser = serial.Serial(port, baud, timeout=0.001)
     time.sleep(2)
     ser.reset_input_buffer()
@@ -132,15 +62,13 @@ def pressure_worker(port, baud, state, stop):
         if vals is None or len(vals) != 7:
             continue
 
-        state.update_pressure(vals)
+        q.put(("pressure", vals, time.perf_counter()))
 
     ser.close()
 
 
 # =========================
-# Load cell worker
-# =========================
-def loadcell_worker(port, baud, state, stop):
+def loadcell_worker(port, baud, q, stop):
     ser = serial.Serial(port, baud, timeout=0.001)
     time.sleep(2)
     ser.reset_input_buffer()
@@ -159,13 +87,11 @@ def loadcell_worker(port, baud, state, stop):
         except:
             continue
 
-        state.update_loadcell(v)
+        q.put(("loadcell", v, time.perf_counter()))
 
     ser.close()
 
 
-# =========================
-# Port dialog
 # =========================
 class PortDialog(QtWidgets.QDialog):
     def __init__(self):
@@ -183,10 +109,9 @@ class PortDialog(QtWidgets.QDialog):
             self.p1.addItem(p.device, p.device)
             self.p2.addItem(p.device, p.device)
 
-        layout.addWidget(QtWidgets.QLabel("Pressure Port"))
+        layout.addWidget(QtWidgets.QLabel("Pressure"))
         layout.addWidget(self.p1)
-
-        layout.addWidget(QtWidgets.QLabel("Load Cell Port"))
+        layout.addWidget(QtWidgets.QLabel("Load Cell"))
         layout.addWidget(self.p2)
 
         btn = QtWidgets.QDialogButtonBox(
@@ -201,17 +126,21 @@ class PortDialog(QtWidgets.QDialog):
 
 
 # =========================
-# Plotter
-# =========================
 class Plotter(QtWidgets.QMainWindow):
     def __init__(self, p_port, l_port):
         super().__init__()
 
-        self.setWindowTitle("Dual Sensor Plotter (Snapshot Logger)")
+        self.setWindowTitle("Dual Sensor Plotter (FIXED)")
 
-        self.state = SystemState()
-
+        self.q = mp.Queue()
         self.stop = mp.Event()
+
+        # latest state (MAIN PROCESS ONLY)
+        self.t0 = time.perf_counter()
+        self.latest_t = 0.0
+        self.latest_p = [0.0]*6
+        self.latest_f = 0.0
+        self.latest_l = 0.0
 
         # buffers
         self.t = deque(maxlen=MAX_STORED_POINTS)
@@ -219,37 +148,26 @@ class Plotter(QtWidgets.QMainWindow):
         self.force = deque(maxlen=MAX_STORED_POINTS)
         self.loadcell = deque(maxlen=MAX_STORED_POINTS)
 
-        # processes
-        self.p_proc = mp.Process(
-            target=pressure_worker,
-            args=(p_port, PRESSURE_BAUD, self.state, self.stop),
-            daemon=True
-        )
+        self.p_proc = mp.Process(target=pressure_worker,
+                                 args=(p_port, PRESSURE_BAUD, self.q, self.stop),
+                                 daemon=True)
 
-        self.l_proc = mp.Process(
-            target=loadcell_worker,
-            args=(l_port, LOADCELL_BAUD, self.state, self.stop),
-            daemon=True
-        )
+        self.l_proc = mp.Process(target=loadcell_worker,
+                                 args=(l_port, LOADCELL_BAUD, self.q, self.stop),
+                                 daemon=True)
 
         self.p_proc.start()
         self.l_proc.start()
 
         self._ui()
 
-        # timers
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
         self.timer.start(GUI_REFRESH_MS)
 
         self.log_timer = time.perf_counter()
 
-        # FPS
-        self.last_gui = time.perf_counter()
-        self.frames = 0
-        self.fps = 0.0
-
-    # =========================
+    # -------------------------
     def _ui(self):
         c = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(c)
@@ -257,16 +175,13 @@ class Plotter(QtWidgets.QMainWindow):
         ctrl = QtWidgets.QHBoxLayout()
         v.addLayout(ctrl)
 
-        self.top = pg.PlotWidget(title="Pressure (T1-T6)")
+        self.top = pg.PlotWidget(title="Pressure")
         self.mid = pg.PlotWidget(title="Force")
-        self.bot = pg.PlotWidget(title="Load Cell")
+        self.bot = pg.PlotWidget(title="LoadCell")
 
         v.addWidget(self.top)
         v.addWidget(self.mid)
         v.addWidget(self.bot)
-
-        self.fps_label = QtWidgets.QLabel("FPS: --")
-        v.addWidget(self.fps_label)
 
         self.curves = []
         for i in range(6):
@@ -285,50 +200,51 @@ class Plotter(QtWidgets.QMainWindow):
     def toggle(self, i, state):
         self.curves[i].setVisible(state == 2)
 
-    # =========================
-    # UPDATE LOOP
-    # =========================
+    # -------------------------
     def update(self):
-        snap = self.state.snapshot()
+        while True:
+            try:
+                msg = self.q.get_nowait()
+            except queue.Empty:
+                break
 
-        t = snap["t"]
+            if msg[0] == "pressure":
+                _, vals, _ = msg
 
-        self.t.append(t)
+                self.latest_p = vals[:6]
+                self.latest_f = vals[6]
+                self.latest_t = time.perf_counter() - self.t0
 
-        for i in range(6):
-            self.ch[i].append(snap["p"][i])
+            elif msg[0] == "loadcell":
+                _, v, _ = msg
+                self.latest_l = v
 
-        self.force.append(snap["f"])
-        self.loadcell.append(snap["l"])
-
-        # ----- 100 Hz logging (true fixed rate) -----
+        # snapshot log
         now = time.perf_counter()
         if now - self.log_timer >= LOG_DT:
             self.log_timer += LOG_DT
-            self._log_snapshot(snap)
+            self._log()
+
+        # store for plot
+        self.t.append(self.latest_t)
+        for i in range(6):
+            self.ch[i].append(self.latest_p[i])
+        self.force.append(self.latest_f)
+        self.loadcell.append(self.latest_l)
 
         self.redraw()
 
-        # FPS
-        self.frames += 1
-        dt = now - self.last_gui
-        if dt >= 0.5:
-            self.fps = self.frames / dt
-            self.frames = 0
-            self.last_gui = now
-            self.fps_label.setText(f"FPS: {self.fps:.1f}")
-
-    # =========================
-    def _log_snapshot(self, s):
+    # -------------------------
+    def _log(self):
         print(
-            f"Timestamp:{s['t']:.4f} "
-            f"T1:{s['p'][0]:.3f} T2:{s['p'][1]:.3f} T3:{s['p'][2]:.3f} "
-            f"T4:{s['p'][3]:.3f} T5:{s['p'][4]:.3f} T6:{s['p'][5]:.3f} "
-            f"Force:{s['f']:.3f} "
-            f"LoadCell:{s['l']:.3f}"
+            f"Timestamp:{self.latest_t:.4f} "
+            f"T1:{self.latest_p[0]:.3f} T2:{self.latest_p[1]:.3f} T3:{self.latest_p[2]:.3f} "
+            f"T4:{self.latest_p[3]:.3f} T5:{self.latest_p[4]:.3f} T6:{self.latest_p[5]:.3f} "
+            f"Force:{self.latest_f:.3f} "
+            f"LoadCell:{self.latest_l:.3f}"
         )
 
-    # =========================
+    # -------------------------
     def redraw(self):
         if len(self.t) < 10:
             return
@@ -350,7 +266,7 @@ class Plotter(QtWidgets.QMainWindow):
         n = min(len(t), len(l))
         self.lcurve.setData(t[:n][m[:n]], l[:n][m[:n]])
 
-    # =========================
+    # -------------------------
     def closeEvent(self, e):
         self.stop.set()
         self.p_proc.terminate()
@@ -358,8 +274,6 @@ class Plotter(QtWidgets.QMainWindow):
         e.accept()
 
 
-# =========================
-# MAIN
 # =========================
 def main():
     mp.set_start_method("spawn", force=True)
