@@ -11,7 +11,28 @@ import serial.tools.list_ports
 
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
-
+"""
+Warning: Ignoring XDG_SESSION_TYPE=wayland on Gnome. Use QT_QPA_PLATFORM=wayland to run on Wayland anyway.
+Traceback (most recent call last):
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 421, in <module>
+    main()
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 413, in main
+    w = Plotter(p, l, log_path)
+        ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 252, in __init__
+    self._ui()
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 276, in _ui
+    self.curves.append(pg.PlotWidget().plot(pen=pg.intColor(i, 6)))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/manavkaronde/myenv/lib/python3.12/site-packages/pyqtgraph/graphicsItems/PlotItem/PlotItem.py", line 779, in plot
+    self.addItem(item, params=params)
+  File "/home/manavkaronde/myenv/lib/python3.12/site-packages/pyqtgraph/graphicsItems/PlotItem/PlotItem.py", line 621, in addItem
+    self.vb.addItem(item, *args, **vbargs)
+  File "/home/manavkaronde/myenv/lib/python3.12/site-packages/pyqtgraph/graphicsItems/ViewBox/ViewBox.py", line 429, in addItem
+    if item.zValue() < self.zValue():
+                       ^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type ViewBox has been deleted
+"""
 
 # =========================
 # Settings
