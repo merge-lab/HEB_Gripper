@@ -309,3 +309,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+"""
+Warning: Ignoring XDG_SESSION_TYPE=wayland on Gnome. Use QT_QPA_PLATFORM=wayland to run on Wayland anyway.
+"""
