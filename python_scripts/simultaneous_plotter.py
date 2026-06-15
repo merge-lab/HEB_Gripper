@@ -197,6 +197,10 @@ class Plotter(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update)
         self.timer.start(GUI_REFRESH_MS)
 
+        self.last_fps_t = time.perf_counter()
+        self.fps = 0.0
+        self.fps_count = 0
+
     def _ui(self):
         c = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(c)
@@ -208,10 +212,12 @@ class Plotter(QtWidgets.QMainWindow):
         self.curves = [self.top.plot(pen=pg.intColor(i, 6)) for i in range(6)]
         self.fcurve = self.mid.plot(pen="y")
         self.lcurve = self.bot.plot(pen="g")
+        self.fps_label = QtWidgets.QLabel("Refresh: -- Hz")
 
         v.addWidget(self.top)
         v.addWidget(self.mid)
         v.addWidget(self.bot)
+        v.addWidget(self.fps_label)
 
         self.setCentralWidget(c)
 
@@ -245,6 +251,17 @@ class Plotter(QtWidgets.QMainWindow):
                     self.lv.append(v)
 
         self.redraw()
+        self.fps_count += 1
+
+        now = time.perf_counter()
+        dt = now - self.last_fps_t
+
+        if dt >= 0.5:  # update twice per second
+            self.fps = self.fps_count / dt
+            self.fps_count = 0
+            self.last_fps_t = now
+
+        self.fps_label.setText(f"Refresh: {self.fps:.1f} Hz")
 
     # =========================
     # SAFE REDRAW (NO MASK BUGS)
