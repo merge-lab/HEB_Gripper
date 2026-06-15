@@ -1,6 +1,7 @@
 import sys
 import time
 import queue
+import threading
 import multiprocessing as mp
 from collections import deque
 
@@ -15,9 +16,7 @@ import pyqtgraph as pg
 PRESSURE_BAUD = 1000000
 LOADCELL_BAUD = 115200
 
-BATCH_SIZE = 5
 GUI_REFRESH_MS = 10
-
 PLOT_WINDOW_SEC = 20
 MAX_STORED_POINTS = 200000
 
@@ -62,7 +61,7 @@ def pressure_worker(port, baud, q, stop):
         if vals is None or len(vals) != 7:
             continue
 
-        q.put(("pressure", vals, time.perf_counter()))
+        q.put(("pressure", vals))
 
     ser.close()
 
@@ -87,60 +86,28 @@ def loadcell_worker(port, baud, q, stop):
         except:
             continue
 
-        q.put(("loadcell", v, time.perf_counter()))
+        q.put(("loadcell", v))
 
     ser.close()
-
-
-# =========================
-class PortDialog(QtWidgets.QDialog):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Select Ports")
-
-        layout = QtWidgets.QVBoxLayout(self)
-
-        ports = list(serial.tools.list_ports.comports())
-
-        self.p1 = QtWidgets.QComboBox()
-        self.p2 = QtWidgets.QComboBox()
-
-        for p in ports:
-            self.p1.addItem(p.device, p.device)
-            self.p2.addItem(p.device, p.device)
-
-        layout.addWidget(QtWidgets.QLabel("Pressure"))
-        layout.addWidget(self.p1)
-        layout.addWidget(QtWidgets.QLabel("Load Cell"))
-        layout.addWidget(self.p2)
-
-        btn = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        )
-        btn.accepted.connect(self.accept)
-        btn.rejected.connect(self.reject)
-        layout.addWidget(btn)
-
-    def selected(self):
-        return self.p1.currentData(), self.p2.currentData()
 
 
 # =========================
 class Plotter(QtWidgets.QMainWindow):
     def __init__(self, p_port, l_port):
         super().__init__()
-
-        self.setWindowTitle("Dual Sensor Plotter (FIXED)")
+        self.setWindowTitle("Dual Sensor Plotter (stable sync)")
 
         self.q = mp.Queue()
         self.stop = mp.Event()
 
-        # latest state (MAIN PROCESS ONLY)
+        # start time
         self.t0 = time.perf_counter()
-        self.latest_t = 0.0
+
+        # latest values (atomic-ish in CPython OK)
         self.latest_p = [0.0]*6
         self.latest_f = 0.0
         self.latest_l = 0.0
+        self.latest_t = 0.0
 
         # buffers
         self.t = deque(maxlen=MAX_STORED_POINTS)
@@ -148,6 +115,7 @@ class Plotter(QtWidgets.QMainWindow):
         self.force = deque(maxlen=MAX_STORED_POINTS)
         self.loadcell = deque(maxlen=MAX_STORED_POINTS)
 
+        # processes
         self.p_proc = mp.Process(target=pressure_worker,
                                  args=(p_port, PRESSURE_BAUD, self.q, self.stop),
                                  daemon=True)
@@ -165,15 +133,39 @@ class Plotter(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update)
         self.timer.start(GUI_REFRESH_MS)
 
-        self.log_timer = time.perf_counter()
+        # 🔥 REAL logger thread
+        self.log_file = open(f"log_{time.strftime('%Y%m%d_%H%M%S')}.txt", "w")
+        self.log_lock = threading.Lock()
+        self.log_stop = threading.Event()
 
-    # -------------------------
+        self.logger = threading.Thread(target=self.logger_loop, daemon=True)
+        self.logger.start()
+
+    # =========================
+    def logger_loop(self):
+        next_t = time.perf_counter()
+
+        while not self.log_stop.is_set():
+            now = time.perf_counter()
+            if now < next_t:
+                time.sleep(0.0005)
+                continue
+
+            next_t += LOG_DT
+
+            with self.log_lock:
+                self.log_file.write(
+                    f"Timestamp:{self.latest_t:.4f} "
+                    f"T1:{self.latest_p[0]:.3f} T2:{self.latest_p[1]:.3f} T3:{self.latest_p[2]:.3f} "
+                    f"T4:{self.latest_p[3]:.3f} T5:{self.latest_p[4]:.3f} T6:{self.latest_p[5]:.3f} "
+                    f"Force:{self.latest_f:.3f} "
+                    f"LoadCell:{self.latest_l:.3f}\n"
+                )
+
+    # ========================= UI =========================
     def _ui(self):
         c = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(c)
-
-        ctrl = QtWidgets.QHBoxLayout()
-        v.addLayout(ctrl)
 
         self.top = pg.PlotWidget(title="Pressure")
         self.mid = pg.PlotWidget(title="Force")
@@ -184,6 +176,8 @@ class Plotter(QtWidgets.QMainWindow):
         v.addWidget(self.bot)
 
         self.curves = []
+        ctrl = QtWidgets.QHBoxLayout()
+
         for i in range(6):
             cb = QtWidgets.QCheckBox(f"T{i+1}")
             cb.setChecked(True)
@@ -192,15 +186,17 @@ class Plotter(QtWidgets.QMainWindow):
 
             self.curves.append(self.top.plot(pen=pg.intColor(i, 6)))
 
+        v.addLayout(ctrl)
+
         self.fcurve = self.mid.plot(pen="y")
         self.lcurve = self.bot.plot(pen="g")
 
         self.setCentralWidget(c)
 
-    def toggle(self, i, state):
-        self.curves[i].setVisible(state == 2)
+    def toggle(self, i, s):
+        self.curves[i].setVisible(s == 2)
 
-    # -------------------------
+    # =========================
     def update(self):
         while True:
             try:
@@ -209,21 +205,14 @@ class Plotter(QtWidgets.QMainWindow):
                 break
 
             if msg[0] == "pressure":
-                _, vals, _ = msg
+                vals = msg[1]
 
                 self.latest_p = vals[:6]
                 self.latest_f = vals[6]
                 self.latest_t = time.perf_counter() - self.t0
 
             elif msg[0] == "loadcell":
-                _, v, _ = msg
-                self.latest_l = v
-
-        # snapshot log
-        now = time.perf_counter()
-        if now - self.log_timer >= LOG_DT:
-            self.log_timer += LOG_DT
-            self._log()
+                self.latest_l = msg[1]
 
         # store for plot
         self.t.append(self.latest_t)
@@ -234,17 +223,7 @@ class Plotter(QtWidgets.QMainWindow):
 
         self.redraw()
 
-    # -------------------------
-    def _log(self):
-        print(
-            f"Timestamp:{self.latest_t:.4f} "
-            f"T1:{self.latest_p[0]:.3f} T2:{self.latest_p[1]:.3f} T3:{self.latest_p[2]:.3f} "
-            f"T4:{self.latest_p[3]:.3f} T5:{self.latest_p[4]:.3f} T6:{self.latest_p[5]:.3f} "
-            f"Force:{self.latest_f:.3f} "
-            f"LoadCell:{self.latest_l:.3f}"
-        )
-
-    # -------------------------
+    # =========================
     def redraw(self):
         if len(self.t) < 10:
             return
@@ -266,11 +245,13 @@ class Plotter(QtWidgets.QMainWindow):
         n = min(len(t), len(l))
         self.lcurve.setData(t[:n][m[:n]], l[:n][m[:n]])
 
-    # -------------------------
+    # =========================
     def closeEvent(self, e):
         self.stop.set()
+        self.log_stop.set()
         self.p_proc.terminate()
         self.l_proc.terminate()
+        self.log_file.close()
         e.accept()
 
 
@@ -280,13 +261,35 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
 
-    dlg = PortDialog()
+    ports = list(serial.tools.list_ports.comports())
+
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Select Ports")
+
+    layout = QtWidgets.QVBoxLayout(dlg)
+
+    p1 = QtWidgets.QComboBox()
+    p2 = QtWidgets.QComboBox()
+
+    for p in ports:
+        p1.addItem(p.device, p.device)
+        p2.addItem(p.device, p.device)
+
+    layout.addWidget(p1)
+    layout.addWidget(p2)
+
+    btn = QtWidgets.QPushButton("Start")
+    layout.addWidget(btn)
+
+    def go():
+        dlg.accept()
+
+    btn.clicked.connect(go)
+
     if dlg.exec_() != QtWidgets.QDialog.Accepted:
         return
 
-    p, l = dlg.selected()
-
-    w = Plotter(p, l)
+    w = Plotter(p1.currentData(), p2.currentData())
     w.resize(1400, 800)
     w.show()
 
