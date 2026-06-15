@@ -26,11 +26,15 @@ GUI_REFRESH_MS = 10
 MAX_STORED_POINTS = 200000
 PLOT_WINDOW_SEC = 20
 
+LOG_ENABLED = True
+LOG_INTERVAL = 0.1
+LOG_FILE = f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
 pg.setConfigOptions(antialias=False)
 
 
 # =========================
-# Parser (unused for loadcell now)
+# Parser
 # =========================
 def parse_line(line: str):
     vals = []
@@ -71,7 +75,6 @@ def pressure_worker(port, baud, q, stop):
         if vals is None:
             continue
 
-        # must be full packet: T1..T6 + Force
         if len(vals) != 7:
             continue
 
@@ -171,9 +174,8 @@ class Plotter(QtWidgets.QMainWindow):
         self.q = mp.Queue()
         self.stop = mp.Event()
 
-        # buffers (LOCKED LENGTH DESIGN)
+        # buffers
         self.t = deque(maxlen=MAX_STORED_POINTS)
-
         self.ch = [deque(maxlen=MAX_STORED_POINTS) for _ in range(6)]
         self.force = deque(maxlen=MAX_STORED_POINTS)
 
@@ -200,23 +202,40 @@ class Plotter(QtWidgets.QMainWindow):
         self.last_fps_t = time.perf_counter()
         self.fps = 0.0
         self.fps_count = 0
-        self.checkboxes = []
 
+        # =========================
+        # LOGGING
+        # =========================
+        self.log_file = None
+        self.last_log_t = time.perf_counter()
+
+        if LOG_ENABLED:
+            self.log_file = open(LOG_FILE, "w")
+            self.log_file.write("Timestamp,T1,T2,T3,T4,T5,T6,Force,LoadCell\n")
+
+    # =========================
     def toggle_channel(self, idx, state):
         self.curves[idx].setVisible(state == 2)
 
+    # =========================
     def _ui(self):
         c = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(c)
+
+        ctrl = QtWidgets.QHBoxLayout()
+        v.addLayout(ctrl)
 
         self.top = pg.PlotWidget(title="Pressure (T1-T6)")
         self.mid = pg.PlotWidget(title="Force (from pressure stream)")
         self.bot = pg.PlotWidget(title="Load Cell")
 
-        self.fps_label = QtWidgets.QLabel("Refresh: -- Hz")
+        v.addWidget(self.top)
+        v.addWidget(self.mid)
+        v.addWidget(self.bot)
 
-        # --- controls FIRST ---
-        ctrl = QtWidgets.QHBoxLayout()
+        self.fps_label = QtWidgets.QLabel("Refresh: -- Hz")
+        v.addWidget(self.fps_label)
+
         self.checkboxes = []
         self.curves = []
 
@@ -231,22 +250,37 @@ class Plotter(QtWidgets.QMainWindow):
 
             self.curves.append(self.top.plot(pen=pg.intColor(i, 6)))
 
-        v.addLayout(ctrl)
-
-        # --- plots ---
-        v.addWidget(self.top)
-        v.addWidget(self.mid)
-        v.addWidget(self.bot)
-        v.addWidget(self.fps_label)
-
-        # --- curves for other plots ---
         self.fcurve = self.mid.plot(pen="y")
         self.lcurve = self.bot.plot(pen="g")
 
         self.setCentralWidget(c)
 
     # =========================
-    # SAFE UPDATE
+    def log_data(self):
+        if not self.log_file:
+            return
+
+        if len(self.t) == 0:
+            return
+
+        t = self.t[-1]
+
+        vals = []
+        for i in range(6):
+            vals.append(self.ch[i][-1] if len(self.ch[i]) else 0.0)
+
+        force = self.force[-1] if len(self.force) else 0.0
+        load = self.lv[-1] if len(self.lv) else 0.0
+
+        line = (
+            f"{t:.3f},"
+            f"{vals[0]:.5f},{vals[1]:.5f},{vals[2]:.5f},"
+            f"{vals[3]:.5f},{vals[4]:.5f},{vals[5]:.5f},"
+            f"{force:.5f},{load:.5f}\n"
+        )
+
+        self.log_file.write(line)
+
     # =========================
     def update(self):
         while True:
@@ -259,7 +293,6 @@ class Plotter(QtWidgets.QMainWindow):
                 _, t_batch, y_batch = msg
 
                 for ti, vals in zip(t_batch, y_batch):
-                    # atomic packet: 6 + force
                     self.t.append(ti)
 
                     if len(vals) >= 7:
@@ -277,21 +310,25 @@ class Plotter(QtWidgets.QMainWindow):
                     self.lt.append(ti)
                     self.lv.append(v)
 
-        self.redraw()
+        # FPS
         self.fps_count += 1
-
         now = time.perf_counter()
         dt = now - self.last_fps_t
 
-        if dt >= 0.5:  # update twice per second
+        if dt >= 0.5:
             self.fps = self.fps_count / dt
             self.fps_count = 0
             self.last_fps_t = now
 
         self.fps_label.setText(f"Refresh: {self.fps:.1f} Hz")
 
-    # =========================
-    # SAFE REDRAW (NO MASK BUGS)
+        # LOGGING (10 Hz)
+        if now - self.last_log_t >= LOG_INTERVAL:
+            self.last_log_t = now
+            self.log_data()
+
+        self.redraw()
+
     # =========================
     def redraw(self):
         if len(self.t) < 10:
@@ -299,39 +336,35 @@ class Plotter(QtWidgets.QMainWindow):
 
         t = np.array(self.t)
         t0 = t[-1] - PLOT_WINDOW_SEC
-
         idx = t >= t0
 
-        t_view = t[idx]
-
-        # pressure channels
         for i, c in enumerate(self.curves):
             y = np.array(self.ch[i])
             n = min(len(t), len(y))
             c.setData(t[:n][idx[:n]], y[:n][idx[:n]])
 
-        # force
         f = np.array(self.force)
         n = min(len(t), len(f))
         self.fcurve.setData(t[:n][idx[:n]], f[:n][idx[:n]])
 
-        # load cell
         if len(self.lt) > 10:
             lt = np.array(self.lt)
             lv = np.array(self.lv)
-
             m = lt >= t0
             self.lcurve.setData(lt[m], lv[m])
 
+    # =========================
     def closeEvent(self, e):
         self.stop.set()
         self.p_proc.terminate()
         self.l_proc.terminate()
+
+        if self.log_file:
+            self.log_file.close()
+
         e.accept()
 
 
-# =========================
-# MAIN
 # =========================
 def main():
     mp.set_start_method("spawn", force=True)
@@ -353,8 +386,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-"""
-Warning: Ignoring XDG_SESSION_TYPE=wayland on Gnome. Use QT_QPA_PLATFORM=wayland to run on Wayland anyway.
-"""
