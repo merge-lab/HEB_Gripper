@@ -200,6 +200,10 @@ class Plotter(QtWidgets.QMainWindow):
         self.last_fps_t = time.perf_counter()
         self.fps = 0.0
         self.fps_count = 0
+        self.checkboxes = []
+
+    def toggle_channel(self, idx, state):
+        self.curves[idx].setVisible(state == 2)
 
     def _ui(self):
         c = QtWidgets.QWidget()
@@ -209,15 +213,35 @@ class Plotter(QtWidgets.QMainWindow):
         self.mid = pg.PlotWidget(title="Force (from pressure stream)")
         self.bot = pg.PlotWidget(title="Load Cell")
 
-        self.curves = [self.top.plot(pen=pg.intColor(i, 6)) for i in range(6)]
-        self.fcurve = self.mid.plot(pen="y")
-        self.lcurve = self.bot.plot(pen="g")
         self.fps_label = QtWidgets.QLabel("Refresh: -- Hz")
 
+        # --- controls FIRST ---
+        ctrl = QtWidgets.QHBoxLayout()
+        self.checkboxes = []
+        self.curves = []
+
+        for i in range(6):
+            cb = QtWidgets.QCheckBox(f"T{i+1}")
+            cb.setChecked(True)
+            cb.stateChanged.connect(
+                lambda state, idx=i: self.toggle_channel(idx, state)
+            )
+            ctrl.addWidget(cb)
+            self.checkboxes.append(cb)
+
+            self.curves.append(self.top.plot(pen=pg.intColor(i, 6)))
+
+        v.addLayout(ctrl)
+
+        # --- plots ---
         v.addWidget(self.top)
         v.addWidget(self.mid)
         v.addWidget(self.bot)
         v.addWidget(self.fps_label)
+
+        # --- curves for other plots ---
+        self.fcurve = self.mid.plot(pen="y")
+        self.lcurve = self.bot.plot(pen="g")
 
         self.setCentralWidget(c)
 
@@ -238,7 +262,10 @@ class Plotter(QtWidgets.QMainWindow):
                     # atomic packet: 6 + force
                     self.t.append(ti)
 
-                    self.force.append(vals[6])
+                    if len(vals) >= 7:
+                        self.force.append(vals[6])
+                    else:
+                        self.force.append(0.0)
 
                     for i in range(6):
                         self.ch[i].append(vals[i])
