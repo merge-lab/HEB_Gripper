@@ -4,9 +4,9 @@ import time
 import datetime
 import queue
 import multiprocessing as mp
+
 from collections import deque
 
-import numpy as np
 import serial
 import serial.tools.list_ports
 
@@ -15,7 +15,7 @@ import pyqtgraph as pg
 
 
 # =========================
-# Settings
+# SETTINGS
 # =========================
 PRESSURE_BAUD = 1000000
 LOADCELL_BAUD = 115200
@@ -23,17 +23,14 @@ LOADCELL_BAUD = 115200
 BATCH_SIZE = 5
 GUI_REFRESH_MS = 10
 
-MAX_STORED_POINTS = 200000
 PLOT_WINDOW_SEC = 20
-
-LOG_HZ = 10  # log at 10 Hz
-
+LOG_HZ = 10
 
 pg.setConfigOptions(antialias=False)
 
 
 # =========================
-# Parser
+# PARSER
 # =========================
 def parse_line(line: str):
     vals = []
@@ -51,7 +48,7 @@ def parse_line(line: str):
 
 
 # =========================
-# Pressure worker
+# WORKERS
 # =========================
 def pressure_worker(port, baud, q, stop, start_event, t0_shared):
     ser = serial.Serial(port, baud, timeout=0.001)
@@ -88,9 +85,6 @@ def pressure_worker(port, baud, q, stop, start_event, t0_shared):
     ser.close()
 
 
-# =========================
-# Load cell worker
-# =========================
 def loadcell_worker(port, baud, q, stop, start_event, t0_shared):
     ser = serial.Serial(port, baud, timeout=0.001)
     time.sleep(2)
@@ -147,7 +141,9 @@ class PortDialog(QtWidgets.QDialog):
             self.p2.addItem(p.device, p.device)
 
         self.out_path = QtWidgets.QLineEdit(
-            os.path.abspath(f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+            os.path.abspath(
+                f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            )
         )
 
         layout.addWidget(QtWidgets.QLabel("Pressure Port"))
@@ -181,7 +177,7 @@ class Plotter(QtWidgets.QMainWindow):
     def __init__(self, p_port, l_port, out_path):
         super().__init__()
 
-        self.setWindowTitle("Dual Sensor Plotter (Fast Mode)")
+        self.setWindowTitle("Stable Dual Sensor Plotter")
 
         # sync
         self.q = mp.Queue()
@@ -189,15 +185,16 @@ class Plotter(QtWidgets.QMainWindow):
         self.start_event = mp.Event()
         self.t0_shared = mp.Value('d', time.perf_counter())
 
-        # buffers
-        self.t = deque(maxlen=MAX_STORED_POINTS)
-        self.ch = [deque(maxlen=MAX_STORED_POINTS) for _ in range(6)]
-        self.force = deque(maxlen=MAX_STORED_POINTS)
+        # buffers (NO numpy, NO mask)
+        self.t = []
+        self.ch = [[] for _ in range(6)]
+        self.force = []
 
-        self.lt = deque(maxlen=MAX_STORED_POINTS)
-        self.lv = deque(maxlen=MAX_STORED_POINTS)
+        self.lt = []
+        self.lv = []
 
         self.out_path = out_path
+        self.file = open(self.out_path, "w")
 
         self.last_log = time.perf_counter()
         self.log_buffer = []
@@ -222,8 +219,6 @@ class Plotter(QtWidgets.QMainWindow):
         self.t0_shared.value = time.perf_counter()
         self.start_event.set()
 
-        self.file = open(self.out_path, "w")
-
         self._ui()
 
         self.timer = QtCore.QTimer()
@@ -241,17 +236,18 @@ class Plotter(QtWidgets.QMainWindow):
 
         ctrl = QtWidgets.QHBoxLayout()
 
-        self.curves = []
-        self.checkboxes = []
-
         self.top = pg.PlotWidget(title="Pressure (T1-T6)")
         self.mid = pg.PlotWidget(title="Force")
         self.bot = pg.PlotWidget(title="Load Cell")
 
+        self.curves = []
+
         for i in range(6):
             cb = QtWidgets.QCheckBox(f"T{i+1}")
             cb.setChecked(True)
-            cb.stateChanged.connect(lambda s, i=i: self.curves[i].setVisible(s == 2))
+            cb.stateChanged.connect(
+                lambda s, i=i: self.curves[i].setVisible(s == 2)
+            )
             ctrl.addWidget(cb)
 
             self.curves.append(self.top.plot(pen=pg.intColor(i, 6)))
@@ -269,7 +265,9 @@ class Plotter(QtWidgets.QMainWindow):
 
         self.setCentralWidget(c)
 
-    # ---------------- UPDATE
+    # =========================
+    # UPDATE
+    # =========================
     def update(self):
         while True:
             try:
@@ -298,7 +296,9 @@ class Plotter(QtWidgets.QMainWindow):
         self.fps_update()
         self.log()
 
-    # ---------------- FPS
+    # =========================
+    # FPS
+    # =========================
     def fps_update(self):
         self.fps_count += 1
         now = time.perf_counter()
@@ -310,7 +310,9 @@ class Plotter(QtWidgets.QMainWindow):
 
         self.fps_label.setText(f"Refresh: {self.fps:.1f} Hz")
 
-    # ---------------- LOG (FAST)
+    # =========================
+    # LOG (FAST, NO FLUSH PER LINE)
+    # =========================
     def log(self):
         now = time.perf_counter()
         if now - self.last_log < 1.0 / LOG_HZ:
@@ -332,35 +334,52 @@ class Plotter(QtWidgets.QMainWindow):
 
         self.log_buffer.append(line)
 
-        if len(self.log_buffer) > 50:
+        if len(self.log_buffer) >= 50:
             self.file.write("\n".join(self.log_buffer) + "\n")
             self.log_buffer.clear()
 
-    # ---------------- REDRAW (FAST PATH)
+    # =========================
+    # REDRAW (NO NUMPY, NO MASKS)
+    # =========================
     def redraw(self):
         if len(self.t) < 10:
             return
 
-        t = np.array(self.t)
+        t = self.t
         t0 = t[-1] - PLOT_WINDOW_SEC
-        idx = t >= t0
 
+        # find start index (fast linear scan backwards)
+        start = 0
+        for i in range(len(t) - 1, -1, -1):
+            if t[i] < t0:
+                start = i
+                break
+
+        tv = t[start:]
+
+        # pressure
         for i, c in enumerate(self.curves):
-            y = np.array(self.ch[i])
-            n = min(len(t), len(y))
-            c.setData(t[:n][idx[:n]], y[:n][idx[:n]])
+            c.setData(tv, self.ch[i][start:])
 
-        f = np.array(self.force)
-        n = min(len(t), len(f))
-        self.fcurve.setData(t[:n][idx[:n]], f[:n][idx[:n]])
+        # force
+        self.fcurve.setData(tv, self.force[start:])
 
+        # loadcell
         if len(self.lt) > 2:
-            lt = np.array(self.lt)
-            lv = np.array(self.lv)
-            m = lt >= t0
-            self.lcurve.setData(lt[m], lv[m])
+            lt = self.lt
+            lv = self.lv
 
-    # ---------------- CLOSE
+            start2 = 0
+            for i in range(len(lt) - 1, -1, -1):
+                if lt[i] < t0:
+                    start2 = i
+                    break
+
+            self.lcurve.setData(lt[start2:], lv[start2:])
+
+    # =========================
+    # CLOSE
+    # =========================
     def closeEvent(self, e):
         self.stop.set()
         self.p_proc.terminate()
