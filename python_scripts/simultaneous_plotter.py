@@ -13,6 +13,13 @@ from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 
 
+"""
+Logs data from HEB UMI and load cell at 100hz and displays it.
+
+HEB UMI is ussualy on ACM0
+Loadcell arduini is ussualy on USB0
+"""
+
 PRESSURE_BAUD = 1000000
 LOADCELL_BAUD = 115200
 
