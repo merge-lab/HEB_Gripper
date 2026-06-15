@@ -350,15 +350,18 @@ if __name__ == "__main__":
 
 
 """
-IndexError: list index out of range
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 35373 but size of corresponding boolean axis is 35375
 Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 286, in update
-    self.channels[i].append(v)
-    ~~~~~~~~~~~~~^^^
-IndexError: list index out of range
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 298, in update
+    self.redraw()
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 312, in redraw
+    self.force_curve.setData(t[mask], np.array(self.force)[mask])
+                                      ~~~~~~~~~~~~~~~~~~~~^^^^^^
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 35373 but size of corresponding boolean axis is 35375
 Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 286, in update
-    self.channels[i].append(v)
-    ~~~~~~~~~~~~~^^^
-IndexError: list index out of range
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 298, in update
+    self.redraw()
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 312, in redraw
+    self.force_curve.setData(t[mask], np.array(self.force)[mask])
+                                      ~~~~~~~~~~~~~~~~~~~~^^^^^^
 """
