@@ -13,19 +13,6 @@ import serial.tools.list_ports
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 
-"""
-Logs data from the HEB UMI and load cell simultaneously
-
-HEB UMI is ussualy on ACM0
-Load Cell is ussualy on USB0
-
-Note: there is some startup lag on Load Cell from what appears to be its 
-internal Arduino code. This is likely a necesity but results in the first 
-1-2 seconds of load cell data being garbage. this should not affect data 
-alignment afterwards so basically just ignore the first couple seconds of 
-data and then go from there.
-"""
-
 
 # =========================
 # Settings
