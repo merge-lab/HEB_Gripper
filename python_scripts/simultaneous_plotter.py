@@ -352,18 +352,26 @@ if __name__ == "__main__":
 
 
 """
-IndexError: boolean index did not match indexed array along axis 0; size of axis is 35373 but size of corresponding boolean axis is 35375
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 2199 but size of corresponding boolean axis is 2200
 Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 298, in update
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 300, in update
     self.redraw()
   File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 312, in redraw
-    self.force_curve.setData(t[mask], np.array(self.force)[mask])
-                                      ~~~~~~~~~~~~~~~~~~~~^^^^^^
-IndexError: boolean index did not match indexed array along axis 0; size of axis is 35373 but size of corresponding boolean axis is 35375
+    c.setData(t[mask], y[mask])
+                       ~^^^^^^
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 2209 but size of corresponding boolean axis is 2210
 Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 298, in update
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 300, in update
     self.redraw()
   File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 312, in redraw
-    self.force_curve.setData(t[mask], np.array(self.force)[mask])
-                                      ~~~~~~~~~~~~~~~~~~~~^^^^^^
+    c.setData(t[mask], y[mask])
+                       ~^^^^^^
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 2224 but size of corresponding boolean axis is 2225
+Traceback (most recent call last):
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 300, in update
+    self.redraw()
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 312, in redraw
+    c.setData(t[mask], y[mask])
+                       ~^^^^^^
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 2229 but size of corresponding boolean axis is 2230
 """
