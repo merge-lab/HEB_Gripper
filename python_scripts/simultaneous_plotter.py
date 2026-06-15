@@ -26,7 +26,7 @@ GUI_REFRESH_MS = 10
 MAX_STORED_POINTS = 200000
 PLOT_WINDOW_SEC = 20
 
-LOG_HZ = 10  # 0.1s logging
+LOG_HZ = 10  # log at 10 Hz
 
 
 pg.setConfigOptions(antialias=False)
@@ -122,14 +122,13 @@ def loadcell_worker(port, baud, q, stop, start_event, t0_shared):
 
         if len(bt) >= BATCH_SIZE:
             q.put(("loadcell", bt, by))
-
             bt, by = [], []
 
     ser.close()
 
 
 # =========================
-# UI Dialog
+# UI
 # =========================
 class PortDialog(QtWidgets.QDialog):
     def __init__(self):
@@ -147,10 +146,9 @@ class PortDialog(QtWidgets.QDialog):
             self.p1.addItem(p.device, p.device)
             self.p2.addItem(p.device, p.device)
 
-        self.out_path = QtWidgets.QLineEdit(self.default_path())
-        self.browse = QtWidgets.QPushButton("Browse")
-
-        self.browse.clicked.connect(self.choose_file)
+        self.out_path = QtWidgets.QLineEdit(
+            os.path.abspath(f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        )
 
         layout.addWidget(QtWidgets.QLabel("Pressure Port"))
         layout.addWidget(self.p1)
@@ -160,7 +158,6 @@ class PortDialog(QtWidgets.QDialog):
 
         layout.addWidget(QtWidgets.QLabel("Output File"))
         layout.addWidget(self.out_path)
-        layout.addWidget(self.browse)
 
         btn = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -168,15 +165,6 @@ class PortDialog(QtWidgets.QDialog):
         btn.accepted.connect(self.accept)
         btn.rejected.connect(self.reject)
         layout.addWidget(btn)
-
-    def default_path(self):
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        return os.path.abspath(f"capture_{ts}.txt")
-
-    def choose_file(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Log")
-        if path:
-            self.out_path.setText(path)
 
     def selected(self):
         return (
@@ -187,15 +175,15 @@ class PortDialog(QtWidgets.QDialog):
 
 
 # =========================
-# Main Plotter
+# MAIN PLOTTER
 # =========================
 class Plotter(QtWidgets.QMainWindow):
     def __init__(self, p_port, l_port, out_path):
         super().__init__()
 
-        self.setWindowTitle("Dual Sensor Plotter (Synchronized)")
+        self.setWindowTitle("Dual Sensor Plotter (Fast Mode)")
 
-        # multiprocessing sync
+        # sync
         self.q = mp.Queue()
         self.stop = mp.Event()
         self.start_event = mp.Event()
@@ -210,7 +198,9 @@ class Plotter(QtWidgets.QMainWindow):
         self.lv = deque(maxlen=MAX_STORED_POINTS)
 
         self.out_path = out_path
-        self.last_log_t = time.perf_counter()
+
+        self.last_log = time.perf_counter()
+        self.log_buffer = []
 
         # processes
         self.p_proc = mp.Process(
@@ -232,7 +222,7 @@ class Plotter(QtWidgets.QMainWindow):
         self.t0_shared.value = time.perf_counter()
         self.start_event.set()
 
-        self.log_file = open(self.out_path, "w")
+        self.file = open(self.out_path, "w")
 
         self._ui()
 
@@ -241,18 +231,18 @@ class Plotter(QtWidgets.QMainWindow):
         self.timer.start(GUI_REFRESH_MS)
 
         self.fps_t = time.perf_counter()
-        self.fps = 0.0
+        self.fps = 0
         self.fps_count = 0
 
-    # -------------------------
+    # ---------------- UI
     def _ui(self):
         c = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(c)
 
         ctrl = QtWidgets.QHBoxLayout()
 
-        self.checkboxes = []
         self.curves = []
+        self.checkboxes = []
 
         self.top = pg.PlotWidget(title="Pressure (T1-T6)")
         self.mid = pg.PlotWidget(title="Force")
@@ -279,7 +269,7 @@ class Plotter(QtWidgets.QMainWindow):
 
         self.setCentralWidget(c)
 
-    # -------------------------
+    # ---------------- UPDATE
     def update(self):
         while True:
             try:
@@ -305,29 +295,28 @@ class Plotter(QtWidgets.QMainWindow):
                     self.lv.append(v)
 
         self.redraw()
-        self.update_fps()
-        self.log_data()
+        self.fps_update()
+        self.log()
 
-    # -------------------------
-    def update_fps(self):
+    # ---------------- FPS
+    def fps_update(self):
         self.fps_count += 1
         now = time.perf_counter()
-        dt = now - self.fps_t
 
-        if dt >= 0.5:
-            self.fps = self.fps_count / dt
+        if now - self.fps_t > 0.5:
+            self.fps = self.fps_count / (now - self.fps_t)
             self.fps_count = 0
             self.fps_t = now
 
         self.fps_label.setText(f"Refresh: {self.fps:.1f} Hz")
 
-    # -------------------------
-    def log_data(self):
+    # ---------------- LOG (FAST)
+    def log(self):
         now = time.perf_counter()
-        if now - self.last_log_t < 1.0 / LOG_HZ:
+        if now - self.last_log < 1.0 / LOG_HZ:
             return
 
-        self.last_log_t = now
+        self.last_log = now
 
         if not self.t:
             return
@@ -338,17 +327,16 @@ class Plotter(QtWidgets.QMainWindow):
             f"Timestamp: {self.t[i]:.4f} "
             + " ".join([f"T{j+1}: {self.ch[j][i]:.3f}" for j in range(6)])
             + f" Force: {self.force[i]:.3f} "
+            + f"LoadCell: {self.lv[i] if self.lv else 0.0:.3f}"
         )
 
-        if self.lt:
-            line += f"LoadCell: {self.lv[i]:.3f}"
-        else:
-            line += "LoadCell: NaN"
+        self.log_buffer.append(line)
 
-        self.log_file.write(line + "\n")
-        self.log_file.flush()
+        if len(self.log_buffer) > 50:
+            self.file.write("\n".join(self.log_buffer) + "\n")
+            self.log_buffer.clear()
 
-    # -------------------------
+    # ---------------- REDRAW (FAST PATH)
     def redraw(self):
         if len(self.t) < 10:
             return
@@ -372,12 +360,16 @@ class Plotter(QtWidgets.QMainWindow):
             m = lt >= t0
             self.lcurve.setData(lt[m], lv[m])
 
-    # -------------------------
+    # ---------------- CLOSE
     def closeEvent(self, e):
         self.stop.set()
         self.p_proc.terminate()
         self.l_proc.terminate()
-        self.log_file.close()
+
+        if self.log_buffer:
+            self.file.write("\n".join(self.log_buffer) + "\n")
+
+        self.file.close()
         e.accept()
 
 
