@@ -56,6 +56,7 @@ def pressure_worker(port, baud, q, stop):
     ser.reset_input_buffer()
 
     bt, by = [], []
+    first_packet = False
 
     while not stop.is_set():
         raw = ser.readline()
@@ -70,8 +71,15 @@ def pressure_worker(port, baud, q, stop):
         if vals is None or len(vals) != 7:
             continue
 
-        bt.append(True)   # placeholder only
+        bt.append(True)
         by.append(vals)
+
+        # 🔴 KEY FIX: flush immediately on first valid packet
+        if not first_packet:
+            q.put(("pressure", [vals]))
+            first_packet = True
+            bt, by = [], []
+            continue
 
         if len(bt) >= BATCH_SIZE:
             q.put(("pressure", by))
@@ -86,6 +94,7 @@ def loadcell_worker(port, baud, q, stop):
     ser.reset_input_buffer()
 
     bt, by = [], []
+    first_packet = False
 
     while not stop.is_set():
         raw = ser.readline()
@@ -103,6 +112,13 @@ def loadcell_worker(port, baud, q, stop):
 
         bt.append(True)
         by.append(v)
+
+        # 🔴 KEY FIX: immediate first sample
+        if not first_packet:
+            q.put(("loadcell", [v]))
+            first_packet = True
+            bt, by = [], []
+            continue
 
         if len(bt) >= BATCH_SIZE:
             q.put(("loadcell", by))
