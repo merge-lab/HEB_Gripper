@@ -343,3 +343,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+    """
+    IndexError: list index out of range
+Traceback (most recent call last):
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 286, in update
+    self.channels[i].append(v)
+    ~~~~~~~~~~~~~^^^
+IndexError: list index out of range
+Traceback (most recent call last):
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 286, in update
+    self.channels[i].append(v)
+    ~~~~~~~~~~~~~^^^
+IndexError: list index out of range
+    """
