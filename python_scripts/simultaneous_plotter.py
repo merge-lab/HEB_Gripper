@@ -11,28 +11,7 @@ import serial.tools.list_ports
 
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
-"""
-Warning: Ignoring XDG_SESSION_TYPE=wayland on Gnome. Use QT_QPA_PLATFORM=wayland to run on Wayland anyway.
-Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 421, in <module>
-    main()
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 413, in main
-    w = Plotter(p, l, log_path)
-        ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 252, in __init__
-    self._ui()
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 276, in _ui
-    self.curves.append(pg.PlotWidget().plot(pen=pg.intColor(i, 6)))
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/manavkaronde/myenv/lib/python3.12/site-packages/pyqtgraph/graphicsItems/PlotItem/PlotItem.py", line 779, in plot
-    self.addItem(item, params=params)
-  File "/home/manavkaronde/myenv/lib/python3.12/site-packages/pyqtgraph/graphicsItems/PlotItem/PlotItem.py", line 621, in addItem
-    self.vb.addItem(item, *args, **vbargs)
-  File "/home/manavkaronde/myenv/lib/python3.12/site-packages/pyqtgraph/graphicsItems/ViewBox/ViewBox.py", line 429, in addItem
-    if item.zValue() < self.zValue():
-                       ^^^^^^^^^^^^^
-RuntimeError: wrapped C/C++ object of type ViewBox has been deleted
-"""
+
 
 # =========================
 # Settings
@@ -286,34 +265,41 @@ class Plotter(QtWidgets.QMainWindow):
         v = QtWidgets.QVBoxLayout(c)
 
         ctrl = QtWidgets.QHBoxLayout()
-        self.curves = []
-
-        for i in range(6):
-            cb = QtWidgets.QCheckBox(f"T{i+1}")
-            cb.setChecked(True)
-            cb.stateChanged.connect(lambda s, i=i: self.toggle(i, s))
-            ctrl.addWidget(cb)
-
-            self.curves.append(pg.PlotWidget().plot(pen=pg.intColor(i, 6)))
-
         v.addLayout(ctrl)
 
-        self.top = pg.PlotWidget(title="Pressure")
-        self.mid = pg.PlotWidget(title="Force")
+        self.top = pg.PlotWidget(title="Pressure (T1-T6)")
+        self.mid = pg.PlotWidget(title="Force (from pressure stream)")
         self.bot = pg.PlotWidget(title="Load Cell")
-
-        self.fcurve = self.mid.plot(pen="y")
-        self.lcurve = self.bot.plot(pen="g")
 
         v.addWidget(self.top)
         v.addWidget(self.mid)
         v.addWidget(self.bot)
 
-        self.fps_label = QtWidgets.QLabel("FPS: --")
+        self.fps_label = QtWidgets.QLabel("Refresh: -- Hz")
         v.addWidget(self.fps_label)
+
+        self.checkboxes = []
+        self.curves = []
+
+        for i in range(6):
+            cb = QtWidgets.QCheckBox(f"T{i+1}")
+            cb.setChecked(True)
+            cb.stateChanged.connect(
+                lambda state, idx=i: self.toggle_channel(idx, state)
+            )
+            ctrl.addWidget(cb)
+            self.checkboxes.append(cb)
+
+            # FIX: plot on EXISTING widget, not a temporary one
+            curve = self.top.plot(pen=pg.intColor(i, 6))
+            self.curves.append(curve)
+
+        self.fcurve = self.mid.plot(pen="y")
+        self.lcurve = self.bot.plot(pen="g")
 
         self.setCentralWidget(c)
 
+        
     def toggle(self, i, state):
         self.curves[i].setVisible(state == 2)
 
