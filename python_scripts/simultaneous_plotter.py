@@ -1,5 +1,7 @@
 import sys
+import os
 import time
+import datetime
 import queue
 import multiprocessing as mp
 from collections import deque
@@ -24,13 +26,14 @@ GUI_REFRESH_MS = 10
 MAX_STORED_POINTS = 200000
 PLOT_WINDOW_SEC = 20
 
-LOG_INTERVAL_SEC = 0.1
+LOG_HZ = 10  # 0.1s logging
+
 
 pg.setConfigOptions(antialias=False)
 
 
 # =========================
-# Parsers
+# Parser
 # =========================
 def parse_line(line: str):
     vals = []
@@ -48,15 +51,17 @@ def parse_line(line: str):
 
 
 # =========================
-# WORKERS (NO TIMESTAMPS ANYMORE)
+# Pressure worker
 # =========================
-def pressure_worker(port, baud, q, stop):
+def pressure_worker(port, baud, q, stop, start_event, t0_shared):
     ser = serial.Serial(port, baud, timeout=0.001)
     time.sleep(2)
     ser.reset_input_buffer()
 
+    start_event.wait()
+    t0 = t0_shared.value
+
     bt, by = [], []
-    first_packet = False
 
     while not stop.is_set():
         raw = ser.readline()
@@ -71,30 +76,30 @@ def pressure_worker(port, baud, q, stop):
         if vals is None or len(vals) != 7:
             continue
 
-        bt.append(True)
+        t = time.perf_counter() - t0
+
+        bt.append(t)
         by.append(vals)
 
-        # 🔴 KEY FIX: flush immediately on first valid packet
-        if not first_packet:
-            q.put(("pressure", [vals]))
-            first_packet = True
-            bt, by = [], []
-            continue
-
         if len(bt) >= BATCH_SIZE:
-            q.put(("pressure", by))
+            q.put(("pressure", bt, by))
             bt, by = [], []
 
     ser.close()
 
 
-def loadcell_worker(port, baud, q, stop):
+# =========================
+# Load cell worker
+# =========================
+def loadcell_worker(port, baud, q, stop, start_event, t0_shared):
     ser = serial.Serial(port, baud, timeout=0.001)
     time.sleep(2)
     ser.reset_input_buffer()
 
+    start_event.wait()
+    t0 = t0_shared.value
+
     bt, by = [], []
-    first_packet = False
 
     while not stop.is_set():
         raw = ser.readline()
@@ -110,30 +115,26 @@ def loadcell_worker(port, baud, q, stop):
         except:
             continue
 
-        bt.append(True)
+        t = time.perf_counter() - t0
+
+        bt.append(t)
         by.append(v)
 
-        # 🔴 KEY FIX: immediate first sample
-        if not first_packet:
-            q.put(("loadcell", [v]))
-            first_packet = True
-            bt, by = [], []
-            continue
-
         if len(bt) >= BATCH_SIZE:
-            q.put(("loadcell", by))
+            q.put(("loadcell", bt, by))
+
             bt, by = [], []
 
     ser.close()
 
 
 # =========================
-# UI
+# UI Dialog
 # =========================
 class PortDialog(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Select Ports")
+        self.setWindowTitle("Select Ports + Output")
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -146,14 +147,20 @@ class PortDialog(QtWidgets.QDialog):
             self.p1.addItem(p.device, p.device)
             self.p2.addItem(p.device, p.device)
 
-        self.file_edit = QtWidgets.QLineEdit("log.txt")
+        self.out_path = QtWidgets.QLineEdit(self.default_path())
+        self.browse = QtWidgets.QPushButton("Browse")
 
-        layout.addWidget(QtWidgets.QLabel("Pressure"))
+        self.browse.clicked.connect(self.choose_file)
+
+        layout.addWidget(QtWidgets.QLabel("Pressure Port"))
         layout.addWidget(self.p1)
-        layout.addWidget(QtWidgets.QLabel("Load Cell"))
+
+        layout.addWidget(QtWidgets.QLabel("Load Cell Port"))
         layout.addWidget(self.p2)
-        layout.addWidget(QtWidgets.QLabel("Log File"))
-        layout.addWidget(self.file_edit)
+
+        layout.addWidget(QtWidgets.QLabel("Output File"))
+        layout.addWidget(self.out_path)
+        layout.addWidget(self.browse)
 
         btn = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -162,49 +169,70 @@ class PortDialog(QtWidgets.QDialog):
         btn.rejected.connect(self.reject)
         layout.addWidget(btn)
 
+    def default_path(self):
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.abspath(f"capture_{ts}.txt")
+
+    def choose_file(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Log")
+        if path:
+            self.out_path.setText(path)
+
     def selected(self):
         return (
             self.p1.currentData(),
             self.p2.currentData(),
-            self.file_edit.text()
+            self.out_path.text()
         )
 
 
 # =========================
-# MAIN
+# Main Plotter
 # =========================
 class Plotter(QtWidgets.QMainWindow):
-    def __init__(self, p_port, l_port, log_path):
+    def __init__(self, p_port, l_port, out_path):
         super().__init__()
 
-        self.setWindowTitle("Synchronized Dual Stream Plotter")
+        self.setWindowTitle("Dual Sensor Plotter (Synchronized)")
 
+        # multiprocessing sync
         self.q = mp.Queue()
         self.stop = mp.Event()
+        self.start_event = mp.Event()
+        self.t0_shared = mp.Value('d', time.perf_counter())
 
-        # unified time base (HOST CLOCK)
+        # buffers
         self.t = deque(maxlen=MAX_STORED_POINTS)
-
         self.ch = [deque(maxlen=MAX_STORED_POINTS) for _ in range(6)]
         self.force = deque(maxlen=MAX_STORED_POINTS)
 
         self.lt = deque(maxlen=MAX_STORED_POINTS)
         self.lv = deque(maxlen=MAX_STORED_POINTS)
 
-        self.log_file = open(log_path, "w")
+        self.out_path = out_path
+        self.last_log_t = time.perf_counter()
 
-        self.last_log = 0.0
+        # processes
+        self.p_proc = mp.Process(
+            target=pressure_worker,
+            args=(p_port, PRESSURE_BAUD, self.q, self.stop, self.start_event, self.t0_shared),
+            daemon=True
+        )
 
-        self.p_proc = mp.Process(target=pressure_worker,
-                                 args=(p_port, PRESSURE_BAUD, self.q, self.stop),
-                                 daemon=True)
-
-        self.l_proc = mp.Process(target=loadcell_worker,
-                                 args=(l_port, LOADCELL_BAUD, self.q, self.stop),
-                                 daemon=True)
+        self.l_proc = mp.Process(
+            target=loadcell_worker,
+            args=(l_port, LOADCELL_BAUD, self.q, self.stop, self.start_event, self.t0_shared),
+            daemon=True
+        )
 
         self.p_proc.start()
         self.l_proc.start()
+
+        time.sleep(1.0)
+        self.t0_shared.value = time.perf_counter()
+        self.start_event.set()
+
+        self.log_file = open(self.out_path, "w")
 
         self._ui()
 
@@ -212,18 +240,21 @@ class Plotter(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update)
         self.timer.start(GUI_REFRESH_MS)
 
-        self.last_fps = time.perf_counter()
-        self.fps = 0
+        self.fps_t = time.perf_counter()
+        self.fps = 0.0
+        self.fps_count = 0
 
-    # =========================
+    # -------------------------
     def _ui(self):
         c = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(c)
 
         ctrl = QtWidgets.QHBoxLayout()
 
+        self.checkboxes = []
         self.curves = []
-        self.top = pg.PlotWidget(title="Pressure")
+
+        self.top = pg.PlotWidget(title="Pressure (T1-T6)")
         self.mid = pg.PlotWidget(title="Force")
         self.bot = pg.PlotWidget(title="Load Cell")
 
@@ -232,6 +263,7 @@ class Plotter(QtWidgets.QMainWindow):
             cb.setChecked(True)
             cb.stateChanged.connect(lambda s, i=i: self.curves[i].setVisible(s == 2))
             ctrl.addWidget(cb)
+
             self.curves.append(self.top.plot(pen=pg.intColor(i, 6)))
 
         self.fcurve = self.mid.plot(pen="y")
@@ -247,10 +279,8 @@ class Plotter(QtWidgets.QMainWindow):
 
         self.setCentralWidget(c)
 
-    # =========================
+    # -------------------------
     def update(self):
-        host_time = time.perf_counter()
-
         while True:
             try:
                 msg = self.q.get_nowait()
@@ -258,88 +288,96 @@ class Plotter(QtWidgets.QMainWindow):
                 break
 
             if msg[0] == "pressure":
-                _, batch = msg
-                for vals in batch:
-                    self.t.append(host_time)
+                _, t_batch, y_batch = msg
 
+                for ti, vals in zip(t_batch, y_batch):
+                    self.t.append(ti)
                     self.force.append(vals[6])
+
                     for i in range(6):
                         self.ch[i].append(vals[i])
 
             elif msg[0] == "loadcell":
-                _, batch = msg
-                for v in batch:
-                    self.lt.append(host_time)
+                _, t_batch, y_batch = msg
+
+                for ti, v in zip(t_batch, y_batch):
+                    self.lt.append(ti)
                     self.lv.append(v)
 
         self.redraw()
         self.update_fps()
-        self.log(host_time)
+        self.log_data()
 
-    # =========================
-    def log(self, t):
-        if len(self.t) == 0:
+    # -------------------------
+    def update_fps(self):
+        self.fps_count += 1
+        now = time.perf_counter()
+        dt = now - self.fps_t
+
+        if dt >= 0.5:
+            self.fps = self.fps_count / dt
+            self.fps_count = 0
+            self.fps_t = now
+
+        self.fps_label.setText(f"Refresh: {self.fps:.1f} Hz")
+
+    # -------------------------
+    def log_data(self):
+        now = time.perf_counter()
+        if now - self.last_log_t < 1.0 / LOG_HZ:
             return
 
-        if t - self.last_log < LOG_INTERVAL_SEC:
+        self.last_log_t = now
+
+        if not self.t:
             return
 
-        self.last_log = t
+        i = -1
 
         line = (
-            f"Timestamp: {t:.4f} "
-            f"T1:{self.ch[0][-1] if self.ch[0] else 0} "
-            f"T2:{self.ch[1][-1] if self.ch[1] else 0} "
-            f"T3:{self.ch[2][-1] if self.ch[2] else 0} "
-            f"T4:{self.ch[3][-1] if self.ch[3] else 0} "
-            f"T5:{self.ch[4][-1] if self.ch[4] else 0} "
-            f"T6:{self.ch[5][-1] if self.ch[5] else 0} "
-            f"Force:{self.force[-1] if self.force else 0} "
-            f"LoadCell:{self.lv[-1] if self.lv else 0}\n"
+            f"Timestamp: {self.t[i]:.4f} "
+            + " ".join([f"T{j+1}: {self.ch[j][i]:.3f}" for j in range(6)])
+            + f" Force: {self.force[i]:.3f} "
         )
 
-        self.log_file.write(line)
+        if self.lt:
+            line += f"LoadCell: {self.lv[i]:.3f}"
+        else:
+            line += "LoadCell: NaN"
 
-    # =========================
-    def update_fps(self):
-        self.fps += 1
-        now = time.perf_counter()
+        self.log_file.write(line + "\n")
+        self.log_file.flush()
 
-        if now - self.last_fps > 0.5:
-            self.fps_label.setText(f"Refresh: {self.fps/(now-self.last_fps):.1f} Hz")
-            self.fps = 0
-            self.last_fps = now
-
-    # =========================
+    # -------------------------
     def redraw(self):
         if len(self.t) < 10:
             return
 
         t = np.array(self.t)
         t0 = t[-1] - PLOT_WINDOW_SEC
-        m = t >= t0
+        idx = t >= t0
 
         for i, c in enumerate(self.curves):
             y = np.array(self.ch[i])
             n = min(len(t), len(y))
-            c.setData(t[:n][m[:n]], y[:n][m[:n]])
+            c.setData(t[:n][idx[:n]], y[:n][idx[:n]])
 
         f = np.array(self.force)
         n = min(len(t), len(f))
-        self.fcurve.setData(t[:n][m[:n]], f[:n][m[:n]])
+        self.fcurve.setData(t[:n][idx[:n]], f[:n][idx[:n]])
 
-        if len(self.lt) > 10:
+        if len(self.lt) > 2:
             lt = np.array(self.lt)
             lv = np.array(self.lv)
-            mm = lt >= t0
-            self.lcurve.setData(lt[mm], lv[mm])
+            m = lt >= t0
+            self.lcurve.setData(lt[m], lv[m])
 
-    # =========================
+    # -------------------------
     def closeEvent(self, e):
         self.stop.set()
-        self.log_file.close()
         self.p_proc.terminate()
         self.l_proc.terminate()
+        self.log_file.close()
         e.accept()
 
 
@@ -352,12 +390,12 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
 
     dlg = PortDialog()
-    if not dlg.exec_():
+    if dlg.exec_() != QtWidgets.QDialog.Accepted:
         return
 
-    p, l, log_path = dlg.selected()
+    p, l, out = dlg.selected()
 
-    w = Plotter(p, l, log_path)
+    w = Plotter(p, l, out)
     w.resize(1400, 800)
     w.show()
 
