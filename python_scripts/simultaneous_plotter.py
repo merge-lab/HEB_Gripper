@@ -278,13 +278,15 @@ class SerialPlotter(QtWidgets.QMainWindow):
                 for ti, vals in zip(t, y):
                     self.times.append(ti)
 
-                    # always treat last value as force
-                    if len(vals) >= 7:
-                        self.force.append(vals[-1])
-                        sensor_vals = vals[:-1]
-                    else:
-                        sensor_vals = vals
+                    # always assume format: T1..T6 + Force
+                    if len(vals) < 7:
+                        continue  # skip bad packet entirely
 
+                    sensor_vals = vals[:6]
+                    force_val = vals[6]
+
+                    self.force.append(force_val)
+                    
                     for i, v in enumerate(sensor_vals):
                         if i < len(self.channels):
                             self.channels[i].append(v)
