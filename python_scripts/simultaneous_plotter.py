@@ -30,7 +30,35 @@ LOG_DT = 1.0 / LOG_HZ
 
 pg.setConfigOptions(antialias=False)
 
-
+"""
+Warning: Ignoring XDG_SESSION_TYPE=wayland on Gnome. Use QT_QPA_PLATFORM=wayland to run on Wayland anyway.
+Traceback (most recent call last):
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 355, in <module>
+    main()
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 347, in main
+    w = Plotter(p, l)
+        ^^^^^^^^^^^^^
+  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 207, in __init__
+    self.p_proc.start()
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ^^^^^^^^^^^^^^^^^
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/context.py", line 224, in _Popen
+    return _default_context.get_context().Process._Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/context.py", line 289, in _Popen
+    return Popen(process_obj)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 32, in __init__
+    super().__init__(process_obj)
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/popen_fork.py", line 19, in __init__
+    self._launch(process_obj)
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/popen_spawn_posix.py", line 47, in _launch
+    reduction.dump(process_obj, fp)
+  File "/home/manavkaronde/local/python312/lib/python3.12/multiprocessing/reduction.py", line 60, in dump
+    ForkingPickler(file, protocol).dump(obj)
+TypeError: cannot pickle '_thread.lock' object
+"""
 # =========================
 # Parser
 # =========================
