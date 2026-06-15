@@ -28,6 +28,19 @@ MAX_STORED_POINTS = 200000
 LOG_HZ = 100
 LOG_DT = 1.0 / LOG_HZ
 
+"""
+Timestamp:2.4345 T1:0.051 T2:0.393 T3:0.018 T4:0.628 T5:0.612 T6:0.796 Force:11.870 LoadCell:nan
+Timestamp:2.4354 T1:0.042 T2:0.376 T3:0.032 T4:0.652 T5:0.609 T6:0.783 Force:11.740 LoadCell:nan
+Timestamp:2.4363 T1:0.053 T2:0.373 T3:0.032 T4:0.631 T5:0.609 T6:0.799 Force:11.740 LoadCell:nan
+Timestamp:2.4373 T1:0.042 T2:0.378 T3:0.042 T4:0.635 T5:0.609 T6:0.792 Force:11.740 LoadCell:nan
+Timestamp:2.4384 T1:0.072 T2:0.373 T3:0.040 T4:0.648 T5:0.629 T6:0.784 Force:11.740 LoadCell:nan
+Timestamp:2.4394 T1:0.048 T2:0.378 T3:0.042 T4:0.642 T5:0.588 T6:0.796 Force:11.740 LoadCell:nan
+Timestamp:2.4403 T1:0.055 T2:0.366 T3:0.051 T4:0.644 T5:0.607 T6:0.795 Force:11.740 LoadCell:nan
+Timestamp:2.4415 T1:0.045 T2:0.373 T3:0.016 T4:0.633 T5:0.607 T6:0.791 Force:11.740 LoadCell:nan
+Timestamp:2.4424 T1:0.064 T2:0.384 T3:0.045 T4:0.633 T5:0.604 T6:0.792 Force:11.740 LoadCell:nan
+Timestamp:2.4435 T1:0.051 T2:0.376 T3:0.037 T4:0.604 T5:0.601 T6:0.776 Force:11.740 LoadCell:nan
+"""
+
 pg.setConfigOptions(antialias=False)
 
 
