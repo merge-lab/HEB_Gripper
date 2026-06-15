@@ -278,12 +278,16 @@ class SerialPlotter(QtWidgets.QMainWindow):
                 for ti, vals in zip(t, y):
                     self.times.append(ti)
 
-                    if len(vals) == len(self.channels) + 1:
+                    # always treat last value as force
+                    if len(vals) >= 7:
                         self.force.append(vals[-1])
-                        vals = vals[:-1]
+                        sensor_vals = vals[:-1]
+                    else:
+                        sensor_vals = vals
 
-                    for i, v in enumerate(vals):
-                        self.channels[i].append(v)
+                    for i, v in enumerate(sensor_vals):
+                        if i < len(self.channels):
+                            self.channels[i].append(v)
 
             elif msg[0] == "loadcell":
                 _, t, y = msg
@@ -345,16 +349,3 @@ if __name__ == "__main__":
     main()
 
 
-    """
-    IndexError: list index out of range
-Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 286, in update
-    self.channels[i].append(v)
-    ~~~~~~~~~~~~~^^^
-IndexError: list index out of range
-Traceback (most recent call last):
-  File "/home/manavkaronde/projects/HEB_Gripper/python_scripts/simultaneous_plotter.py", line 286, in update
-    self.channels[i].append(v)
-    ~~~~~~~~~~~~~^^^
-IndexError: list index out of range
-    """
