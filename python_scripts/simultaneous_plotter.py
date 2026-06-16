@@ -150,6 +150,14 @@ class Plotter(QtWidgets.QMainWindow):
 
     # =========================
     def logger_loop(self):
+        # Wait 20 seconds before starting any logging
+        start_logging_at = self.t0 + 15.0
+
+        while not self.log_stop.is_set():
+            if time.perf_counter() >= start_logging_at:
+                break
+            time.sleep(0.01)
+
         next_t = time.perf_counter()
 
         while not self.log_stop.is_set():
