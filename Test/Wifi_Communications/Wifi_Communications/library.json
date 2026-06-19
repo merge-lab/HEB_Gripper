@@ -1,0 +1,6 @@
+{
+  "name": "WifiCommunications",
+  "version": "1.0.0",
+  "description": "Telemetry package for HEB telemetry",
+  "frameworks": ["arduino"]
+}
