@@ -48,6 +48,11 @@ const int RAMP_WIDTH = 8;
 #define DEGREES_PER_REV     360.0f
 #define COUNTS_TO_DEG       (DEGREES_PER_REV / COUNTS_PER_REV)
 #define SPEED_SCALE_DEG     (1000.0f * COUNTS_TO_DEG)
+
+// Fixed torque sign for this motor's wiring/encoder convention.
+// Deterministic replacement for the old detect_motor_direction() auto-cal.
+// If the spring pushes the wrong way, flip this between 1 and -1 and reflash.
+#define MOTOR_DIRECTION     (1)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -203,9 +208,10 @@ void send_response(Device_Responses response) {
 	Response_Packet resp;
 	resp.startByte     = START_BYTE;
 	resp.response      = response;
-	resp.encoder_value = get_motor_enc();
-	// motor_value carries the most recent commanded torque (bit-cast float -> u32).
-	memcpy(&resp.motor_value, (const void *)&debug_torque, sizeof(resp.motor_value));
+	// DIAGNOSTIC: report the control loop's position (deg) and commanded torque,
+	// both bit-cast floats, so the ESP32 can stream them while the handle moves.
+	memcpy(&resp.encoder_value, (const void *)&debug_position, sizeof(resp.encoder_value));
+	memcpy(&resp.motor_value,   (const void *)&debug_torque,   sizeof(resp.motor_value));
 	resp.endByte       = END_BYTE;
 
 	memcpy(response_tx_buffer, &resp, sizeof(Response_Packet));
@@ -232,7 +238,24 @@ void handle_command(void) {
 		send_response(PONG);
 		break;
 
-	// CONSTANT_FORCE / SPRING_FORCE / VIBRATE / RELAX to be implemented next.
+	case SPRING_FORCE: {
+		// param_1 carries the spring constant as a bit-cast float.
+		float k;
+		memcpy(&k, &cmd.param_1, sizeof(k));
+
+		// Reject nonsense / unsafe stiffness (negative = positive feedback).
+		if (isnan(k) || isinf(k) || k < 0.0f) {
+			send_response(WRONG_PARAMS);
+			break;
+		}
+
+		control_type   = SPRING;
+		torque_setpoint = k;       // used as kp by the 1 kHz spring loop
+		send_response(ACK);
+		break;
+	}
+
+	// CONSTANT_FORCE / VIBRATE / RELAX to be implemented next.
 	default:
 		send_response(NOT_RECOGNIZED);
 		break;
@@ -339,8 +362,8 @@ void loop_1ms()
     {
 
         torque_command =
-            kp * spring_error
-            -kd * speed_filt;
+            -kp * spring_error   // restoring: torque opposes displacement
+            -kd * speed_filt;    // damping: torque opposes velocity
     }
 
     /* ----- Torque LPF ----- */
@@ -495,7 +518,7 @@ int main(void) {
 		MC_ProgramTorqueRampMotor1(0.3, 0);
 		MC_StartMotor1();
 	}
-	direction_correction = -detect_motor_direction();
+	direction_correction = MOTOR_DIRECTION;   // fixed sign; see MOTOR_DIRECTION define
 
 	/* Set current handle position as spring center */
 	position_offset = (int32_t)ENCODER_M1._Super.hMecAngle;

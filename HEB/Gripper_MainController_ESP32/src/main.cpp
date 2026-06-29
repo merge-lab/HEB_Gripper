@@ -254,15 +254,34 @@ void setup() {
   Serial.begin(115200);                        // USB serial for debug output
   Serial2.begin(115200, SERIAL_8N1, 16, 17);   // link to the STM32
   delay(500);
-  Serial.println("ESP32 up. Pinging STM32...");
+
+  bool pong = motor.ping_controller(500);
+  digitalWrite(2, pong ? HIGH : LOW);
+  Serial.println(pong ? "link up (PONG)" : "no PONG - check link");
+  Serial.println("Type a spring constant (e.g. 1.0) and press enter:");
 }
 
 void loop() {
-  // Send a PING and block up to 500 ms for a PONG.
-  bool pong = motor.ping_controller(500);
+  static float k = 1.0f;   // start with a live spring; type 0 to release, or another value to change
 
-  digitalWrite(2, pong ? HIGH : LOW);          // LED solid = link alive
-  Serial.println(pong ? "PONG received" : "no response");
+  // Type a stiffness value in the serial monitor to change the spring constant.
+  if (Serial.available()) {
+    k = Serial.parseFloat();
+    while (Serial.available()) Serial.read();   // flush trailing newline/chars
+    Serial.printf("set spring k = %.2f\n", k);
+  }
 
-  delay(1000);
+  // Re-send the current k every cycle (keeps the spring set) and stream back
+  // the STM's view of position + commanded torque for diagnosis.
+  Response_Packet resp;
+  if (motor.set_spring_force(k, &resp)) {
+    float pos_deg, torque;
+    memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
+    memcpy(&torque,  &resp.motor_value,  sizeof(torque));
+    Serial.printf("k=%.2f  pos=%+.2f deg  torque=%+.3f\n", k, pos_deg, torque);
+  } else {
+    Serial.println("no ACK (rejected or timed out)");
+  }
+
+  delay(200);
 }
