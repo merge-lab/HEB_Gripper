@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include "gripper_protocol.h"   // shared binary wire protocol with the ESP32
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -86,6 +87,11 @@ volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
 uint8_t rx_index = 0;
 uint8_t rx_char;
 volatile bool command_ready = false;
+
+// Binary protocol: latest fully-framed command packet, plus a dedicated TX
+// buffer for the response (kept separate from tx_buffer used by printf).
+volatile Command_Packet pending_command;
+uint8_t response_tx_buffer[sizeof(Response_Packet)];
 volatile int32_t position_offset;
 volatile float torque_setpoint;
 volatile ControlType control_type;
@@ -117,6 +123,9 @@ static void MX_USART2_UART_Init(void);
 static void MX_NVIC_Init(void);
 /* USER CODE BEGIN PFP */
 static void MX_TIM6_Init(void);
+void handle_command(void);
+void send_response(Device_Responses response);
+uint32_t get_motor_enc(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -159,117 +168,74 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 				HAL_UART_Transmit_IT(&huart2, &echo_char, 1);
 			}
 		}
-		// If the received character is a newline (or enter key)...
-		if (rx_char == '\n') {
-			// Null-terminate the string in the buffer
-			rx_buffer[rx_index] = '\0';
+		// ----- Binary frame assembler (resync-safe) -----
+		// A frame is a fixed-size Command_Packet bracketed by START_BYTE/END_BYTE.
+		uint8_t b = rx_char;
 
-			// Set the flag to indicate a command is ready to be processed
-			command_ready = true;
+		if (rx_index == 0) {
+			// Hunting for the start of a packet; ignore any noise until START_BYTE.
+			if (b == (uint8_t)START_BYTE) {
+				rx_buffer[rx_index++] = b;
+			}
+		} else {
+			rx_buffer[rx_index++] = b;
 
-			// Reset the buffer index for the next command
-			rx_index = 0;
-		} else // If it's any other character...
-		{
-			// Add the character to our buffer
-			if (rx_index < RX_BUFFER_SIZE - 1) {
-				rx_buffer[rx_index++] = rx_char;
+			if (rx_index == sizeof(Command_Packet)) {
+				// Full frame collected; only accept it if the trailing byte frames it.
+				if (rx_buffer[sizeof(Command_Packet) - 1] == (uint8_t)END_BYTE) {
+					memcpy((void *)&pending_command,
+					       (const void *)rx_buffer,
+					       sizeof(Command_Packet));
+					command_ready = true;
+				}
+				rx_index = 0; // reset for the next frame (also resyncs on a bad frame)
+			} else if (rx_index >= RX_BUFFER_SIZE) {
+				rx_index = 0; // overflow guard, should never hit for a valid packet
 			}
 		}
 
-		// Re-arm the UART receive interrupt to wait for the next character
+		// Re-arm the UART receive interrupt to wait for the next byte
 		HAL_UART_Receive_IT(&huart2, &rx_char, 1);
 	}
 }
 
-void handle_command() {
+void send_response(Device_Responses response) {
+	Response_Packet resp;
+	resp.startByte     = START_BYTE;
+	resp.response      = response;
+	resp.encoder_value = get_motor_enc();
+	// motor_value carries the most recent commanded torque (bit-cast float -> u32).
+	memcpy(&resp.motor_value, (const void *)&debug_torque, sizeof(resp.motor_value));
+	resp.endByte       = END_BYTE;
+
+	memcpy(response_tx_buffer, &resp, sizeof(Response_Packet));
+	// Fire-and-forget DMA send; if a previous TX (e.g. printf) is still in
+	// flight this returns busy and the response is dropped. Fine for bring-up.
+	HAL_UART_Transmit_DMA(&huart2, response_tx_buffer, sizeof(Response_Packet));
+}
+
+void handle_command(void) {
 	command_ready = false; // Reset the flag
 
-	// Switch on the first character of the command buffer
-	switch (rx_buffer[0]) {
-	// Case for 'F' or 'f' (Fault check)
-	case 'F':
-	case 'f': {
-		uint16_t faults = MC_GetOccurredFaultsMotor1();
+	// Take a local copy so the ISR can keep filling pending_command.
+	Command_Packet cmd;
+	memcpy(&cmd, (const void *)&pending_command, sizeof(Command_Packet));
 
-		/*if (faults == MC_NO_FAULTS) {
-			printf(" -> No faults detected.\n");
-		}
-		if (faults & MC_DURATION) {
-			printf(" -> FAULT: FOC rate too high (Task Overrun)!\n");
-		}
-		if (faults & MC_OVER_VOLT) {
-			printf(" -> FAULT: Over-Voltage!\n");
-		}
-		if (faults & MC_UNDER_VOLT) {
-			printf(" -> FAULT: Under-Voltage!\n");
-		}
-		if (faults & MC_OVER_TEMP) {
-			printf(" -> FAULT: Over-Temperature!\n");
-		}
-		if (faults & MC_START_UP) {
-			printf(" -> FAULT: Startup Failure!\n");
-		}
-		if (faults & MC_SPEED_FDBK) {
-			printf(" -> FAULT: Speed Feedback Error!\n");
-		}
-		if (faults & MC_OVER_CURR) {
-			printf(" -> FAULT: Hardware Over-Current!\n");
-		}
-		if (faults & MC_SW_ERROR) {
-			printf(" -> FAULT: Generic Software Error!\n");
-		}
-		if (faults & MC_DP_FAULT) {
-			printf(" -> FAULT: Driver Protection Fault!\n");
-		}*/
-		printf("f %u\n", faults);
-		break;
-
+	// Framing is checked in the ISR, but guard anyway.
+	if (cmd.startByte != START_BYTE || cmd.endByte != END_BYTE) {
+		send_response(MALFORMED);
+		return;
 	}
 
-		// Case for 'A' or 'a' (Acknowledge fault)
-	case 'A':
-	case 'a': {
-		if (MC_AcknowledgeFaultMotor1()) {
-			printf("a 1\n");
-		} else {
-			printf("a 0\n");
-		}
+	switch (cmd.command) {
+	case PING:
+		send_response(PONG);
 		break;
-	}
 
-		// Case for 'T' or 't' (Torque command with a value)
-	case 'T':
-	case 't': {
-		char command_char;
-		float value;
-		// Parse the buffer to extract the float value after the 'T'
-		if (sscanf((const char*) rx_buffer, "%c %f", &command_char, &value) == 2) {
-			torque_setpoint = value;
-			printf("t 1\n");
-		}
-		printf("t 0\n");
+	// CONSTANT_FORCE / SPRING_FORCE / VIBRATE / RELAX to be implemented next.
+	default:
+		send_response(NOT_RECOGNIZED);
 		break;
-	}
-
-	case 'M':
-	case 'm': {
-		char command_char;
-		int value;
-		if (sscanf((const char*) rx_buffer, "%c %d", &command_char, &value) == 2) {
-			if (value == 0) {
-				control_type = CONSTANT;
-			} else if (value == 1) {
-				control_type = SPRING;
-			}
-		}
-		break;
-	}
-
-		// Default case for any other unknown command
-	default: {
-		break;
-	}
 	}
 }
 
