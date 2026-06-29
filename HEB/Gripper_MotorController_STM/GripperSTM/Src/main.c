@@ -98,7 +98,8 @@ volatile bool command_ready = false;
 volatile Command_Packet pending_command;
 uint8_t response_tx_buffer[sizeof(Response_Packet)];
 volatile int32_t position_offset;
-volatile float torque_setpoint;
+volatile float torque_setpoint;          // spring stiffness (kp) in SPRING mode
+volatile float constant_force_setpoint;  // commanded torque in CONSTANT mode
 volatile ControlType control_type;
 int16_t direction_correction = 1;
 
@@ -255,7 +256,24 @@ void handle_command(void) {
 		break;
 	}
 
-	// CONSTANT_FORCE / VIBRATE / RELAX to be implemented next.
+	case CONSTANT_FORCE: {
+		// param_1 carries the commanded torque as a bit-cast float.
+		// Sign selects direction; magnitude is clamped by the loop's saturation.
+		float f;
+		memcpy(&f, &cmd.param_1, sizeof(f));
+
+		if (isnan(f) || isinf(f)) {
+			send_response(WRONG_PARAMS);
+			break;
+		}
+
+		control_type          = CONSTANT;
+		constant_force_setpoint = f;
+		send_response(ACK);
+		break;
+	}
+
+	// VIBRATE / RELAX to be implemented next.
 	default:
 		send_response(NOT_RECOGNIZED);
 		break;
@@ -349,21 +367,28 @@ void loop_1ms()
             spring_error += pos_deadband;
     }
 
-    /* ----- Spring-Damper ----- */
+    /* ----- Control law (depends on mode) ----- */
 
     float torque_command;
 
-    if (fabsf(pos_deg) < pos_deadband &&
-        fabsf(speed_filt) < vel_deadband)
+    if (control_type == CONSTANT)
     {
-        torque_command = 0.0f;
+        // Open-loop constant torque, independent of position.
+        torque_command = constant_force_setpoint;
     }
-    else
+    else // SPRING
     {
-
-        torque_command =
-            -kp * spring_error   // restoring: torque opposes displacement
-            -kd * speed_filt;    // damping: torque opposes velocity
+        if (fabsf(pos_deg) < pos_deadband &&
+            fabsf(speed_filt) < vel_deadband)
+        {
+            torque_command = 0.0f;
+        }
+        else
+        {
+            torque_command =
+                -kp * spring_error   // restoring: torque opposes displacement
+                -kd * speed_filt;    // damping: torque opposes velocity
+        }
     }
 
     /* ----- Torque LPF ----- */

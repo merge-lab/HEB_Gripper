@@ -108,13 +108,18 @@ bool HapticMotorController::ping_controller(unsigned long wait_time)
     return resp.response == PONG;
 }
 
-bool HapticMotorController::set_constant_force(int force, Response_Packet* recieved)
+bool HapticMotorController::set_constant_force(float force, Response_Packet* recieved)
 {
+    // Torque is a float, but params travel as uint32_t. Bit-cast (not numeric
+    // convert) so the fractional part survives the wire.
+    uint32_t force_bits;
+    memcpy(&force_bits, &force, sizeof(force_bits));
+
     Command_Packet packet =
     {
         START_BYTE,
         CONSTANT_FORCE,
-        force,
+        force_bits,
         0, 0, 0, 0, 0,
         END_BYTE
     };

@@ -261,24 +261,37 @@ void setup() {
   Serial.println("Type a spring constant (e.g. 1.0) and press enter:");
 }
 
-void loop() {
-  static float k = 1.0f;   // start with a live spring; type 0 to release, or another value to change
+enum TestMode { MODE_SPRING, MODE_CONSTANT };
 
-  // Type a stiffness value in the serial monitor to change the spring constant.
+void loop() {
+  static TestMode mode = MODE_SPRING;   // boot with a live spring
+  static float value = 1.0f;
+
+  // Serial input: "s <val>" = spring stiffness, "c <val>" = constant torque,
+  // a bare number keeps the current mode and just changes the value.
   if (Serial.available()) {
-    k = Serial.parseFloat();
-    while (Serial.available()) Serial.read();   // flush trailing newline/chars
-    Serial.printf("set spring k = %.2f\n", k);
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      char c = line.charAt(0);
+      if (c == 's' || c == 'S')      { mode = MODE_SPRING;   value = line.substring(1).toFloat(); }
+      else if (c == 'c' || c == 'C') { mode = MODE_CONSTANT; value = line.substring(1).toFloat(); }
+      else                           { value = line.toFloat(); }
+      Serial.printf("mode=%s value=%.3f\n",
+                    mode == MODE_SPRING ? "spring" : "constant", value);
+    }
   }
 
-  // Re-send the current k every cycle (keeps the spring set) and stream back
-  // the STM's view of position + commanded torque for diagnosis.
+  // Re-send the active command each cycle (keeps it set) and stream telemetry.
   Response_Packet resp;
-  if (motor.set_spring_force(k, &resp)) {
+  bool ok = (mode == MODE_SPRING) ? motor.set_spring_force(value, &resp)
+                                  : motor.set_constant_force(value, &resp);
+  if (ok) {
     float pos_deg, torque;
     memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
     memcpy(&torque,  &resp.motor_value,  sizeof(torque));
-    Serial.printf("k=%.2f  pos=%+.2f deg  torque=%+.3f\n", k, pos_deg, torque);
+    Serial.printf("[%s %.3f] pos=%+.2f deg  torque=%+.3f\n",
+                  mode == MODE_SPRING ? "spr" : "con", value, pos_deg, torque);
   } else {
     Serial.println("no ACK (rejected or timed out)");
   }

@@ -24,14 +24,15 @@ public:
     /*
     Tell device to use constant force.
     Input:
-        int force - unitless force value to send
+        float force - commanded torque (sign selects direction); magnitude is
+            clamped by the motor controller's saturation limit
         ResponsePacket* recieved - pointer for the response packet
             - if NULL, will not block waiting for a response (fire-and-forget)
             - if not null, filled with the response; only valid when true is returned
     Returns: true if a valid response was received (or NULL was passed,
              meaning we did not wait); false if the response was invalid/timed out
     */
-    bool set_constant_force(int force, Response_Packet* recieved);
+    bool set_constant_force(float force, Response_Packet* recieved);
 
     /*
     Tell device to use spring force
