@@ -101,6 +101,10 @@ volatile int32_t position_offset;
 volatile float torque_setpoint;          // spring stiffness (kp) in SPRING mode
 volatile float constant_force_setpoint;  // commanded torque in CONSTANT mode
 volatile ControlType control_type;
+
+// Vibration overlay (added on top of the active base mode). 0 amplitude = off.
+volatile float vib_freq_hz = 0.0f;
+volatile float vib_amplitude = 0.0f;
 int16_t direction_correction = 1;
 
 volatile float debug_position = 0;
@@ -273,7 +277,26 @@ void handle_command(void) {
 		break;
 	}
 
-	// VIBRATE / RELAX to be implemented next.
+	case VIBRATE: {
+		// param_1 = frequency in Hz (integer); param_2 = amplitude (bit-cast float).
+		// Overlay only: does not change the active base mode (spring/constant).
+		uint32_t freq_u = cmd.param_1;
+		float amp;
+		memcpy(&amp, &cmd.param_2, sizeof(amp));
+
+		// Keep well under the 1 kHz loop's Nyquist limit; reject bad amplitude.
+		if (isnan(amp) || isinf(amp) || amp < 0.0f || freq_u > 400) {
+			send_response(WRONG_PARAMS);
+			break;
+		}
+
+		vib_freq_hz   = (float)freq_u;
+		vib_amplitude = amp;        // 0 disables the overlay
+		send_response(ACK);
+		break;
+	}
+
+	// RELAX to be implemented next.
 	default:
 		send_response(NOT_RECOGNIZED);
 		break;
@@ -391,7 +414,7 @@ void loop_1ms()
         }
     }
 
-    /* ----- Torque LPF ----- */
+    /* ----- Torque LPF (base force only) ----- */
 
     static float torque_filt = 0.0f;
 
@@ -399,16 +422,31 @@ void loop_1ms()
         0.90f * torque_filt +
         0.10f * torque_command;
 
+    /* ----- Vibration overlay -----
+       Added AFTER the LPF so it isn't attenuated by the ~17 Hz filter. */
+
+    static float vib_phase = 0.0f;
+    const float TWO_PI = 6.28318530718f;
+
+    float torque_out = torque_filt;
+
+    if (vib_amplitude > 0.0f && vib_freq_hz > 0.0f) {
+        vib_phase += TWO_PI * vib_freq_hz / 1000.0f;   // 1 kHz loop rate
+        if (vib_phase > TWO_PI)
+            vib_phase -= TWO_PI;
+        torque_out += vib_amplitude * sinf(vib_phase);
+    }
+
     /* ----- Saturation ----- */
 
-    if (torque_filt > 1.5f)
-        torque_filt = 1.5f;
+    if (torque_out > 1.5f)
+        torque_out = 1.5f;
 
-    if (torque_filt < -1.5f)
-        torque_filt = -1.5f;
+    if (torque_out < -1.5f)
+        torque_out = -1.5f;
 
     MC_ProgramTorqueRampMotor1_F(
-        torque_filt * (float)direction_correction,
+        torque_out * (float)direction_correction,
         0);
 
     /* ----- Debug ----- */

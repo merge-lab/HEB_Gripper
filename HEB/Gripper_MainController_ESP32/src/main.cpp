@@ -258,31 +258,92 @@ void setup() {
   bool pong = motor.ping_controller(500);
   digitalWrite(2, pong ? HIGH : LOW);
   Serial.println(pong ? "link up (PONG)" : "no PONG - check link");
-  Serial.println("Type a spring constant (e.g. 1.0) and press enter:");
+  Serial.println("Commands:");
+  Serial.println("  s <k>        spring base (stiffness)");
+  Serial.println("  c <t>        constant-force base (torque, signed)");
+  Serial.println("  f <hz>       set vibration frequency");
+  Serial.println("  a <amp>      set vibration amplitude (0 = off)");
+  Serial.println("  v <hz> <amp> set vibration freq + amp together");
+  Serial.println("  sweep        toggle auto frequency sweep");
 }
 
 enum TestMode { MODE_SPRING, MODE_CONSTANT };
 
+// Frequencies (Hz) stepped through in auto-sweep mode.
+const int SWEEP_FREQS[] = {10, 20, 30, 50, 75, 100, 150, 200};
+const int SWEEP_COUNT   = sizeof(SWEEP_FREQS) / sizeof(SWEEP_FREQS[0]);
+const int SWEEP_HOLD    = 8;   // ~200 ms loop cycles to hold each step (~1.6 s)
+
+// Send the current vibration setting and report the ACK.
+void applyVibrate(int freq, float amp) {
+  Response_Packet r;
+  if (motor.vibrate(freq, amp, &r))
+    Serial.printf("  -> vibrate %d Hz, amp %.3f\n", freq, amp);
+  else
+    Serial.println("  -> vibrate no ACK (rejected? freq must be 0..400)");
+}
+
 void loop() {
   static TestMode mode = MODE_SPRING;   // boot with a live spring
-  static float value = 1.0f;
+  static float value   = 1.0f;
+  static int   vibFreq = 0;
+  static float vibAmp  = 0.0f;
+  static bool  sweep   = false;
+  static int   sweepIdx = 0, sweepTick = 0;
 
-  // Serial input: "s <val>" = spring stiffness, "c <val>" = constant torque,
-  // a bare number keeps the current mode and just changes the value.
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     line.trim();
-    if (line.length() > 0) {
-      char c = line.charAt(0);
-      if (c == 's' || c == 'S')      { mode = MODE_SPRING;   value = line.substring(1).toFloat(); }
-      else if (c == 'c' || c == 'C') { mode = MODE_CONSTANT; value = line.substring(1).toFloat(); }
-      else                           { value = line.toFloat(); }
-      Serial.printf("mode=%s value=%.3f\n",
-                    mode == MODE_SPRING ? "spring" : "constant", value);
+
+    if (line.equalsIgnoreCase("sweep")) {
+      sweep = !sweep;
+      sweepIdx = 0;
+      sweepTick = 0;
+      if (sweep && vibAmp <= 0.0f) vibAmp = 0.2f;   // need some amplitude to feel it
+      if (!sweep) applyVibrate(0, 0.0f);            // stop the buzz when turning off
+      Serial.printf("sweep %s (amp %.2f)\n", sweep ? "ON" : "OFF", vibAmp);
+    }
+    else if (line.length() > 0) {
+      char ch = line.charAt(0);
+      String arg = line.substring(1);
+      arg.trim();
+
+      if (ch == 's' || ch == 'S') {
+        mode = MODE_SPRING; value = arg.toFloat();
+        Serial.printf("base = spring %.3f\n", value);
+      } else if (ch == 'c' || ch == 'C') {
+        mode = MODE_CONSTANT; value = arg.toFloat();
+        Serial.printf("base = constant %.3f\n", value);
+      } else if (ch == 'f' || ch == 'F') {
+        sweep = false; vibFreq = arg.toInt(); applyVibrate(vibFreq, vibAmp);
+      } else if (ch == 'a' || ch == 'A') {
+        vibAmp = arg.toFloat(); applyVibrate(vibFreq, vibAmp);
+      } else if (ch == 'v' || ch == 'V') {
+        sweep = false;
+        int sp = arg.indexOf(' ');
+        vibFreq = arg.toInt();
+        vibAmp  = (sp >= 0) ? arg.substring(sp + 1).toFloat() : vibAmp;
+        applyVibrate(vibFreq, vibAmp);
+      } else {
+        value = line.toFloat();
+        Serial.printf("base value = %.3f\n", value);
+      }
     }
   }
 
-  // Re-send the active command each cycle (keeps it set) and stream telemetry.
+  // Auto-sweep: advance through SWEEP_FREQS, holding the current amplitude.
+  if (sweep && vibAmp > 0.0f) {
+    if (sweepTick == 0) {
+      vibFreq = SWEEP_FREQS[sweepIdx];
+      applyVibrate(vibFreq, vibAmp);
+    }
+    if (++sweepTick >= SWEEP_HOLD) {
+      sweepTick = 0;
+      sweepIdx = (sweepIdx + 1) % SWEEP_COUNT;
+    }
+  }
+
+  // Re-send the active base command each cycle (keeps it set) and stream telemetry.
   Response_Packet resp;
   bool ok = (mode == MODE_SPRING) ? motor.set_spring_force(value, &resp)
                                   : motor.set_constant_force(value, &resp);
@@ -290,11 +351,24 @@ void loop() {
     float pos_deg, torque;
     memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
     memcpy(&torque,  &resp.motor_value,  sizeof(torque));
-    Serial.printf("[%s %.3f] pos=%+.2f deg  torque=%+.3f\n",
-                  mode == MODE_SPRING ? "spr" : "con", value, pos_deg, torque);
+    Serial.printf("[%s %.2f | vib %dHz %.2f%s] pos=%+.2f torque=%+.3f\n",
+                  mode == MODE_SPRING ? "spr" : "con", value,
+                  vibFreq, vibAmp, sweep ? " SWEEP" : "",
+                  pos_deg, torque);
   } else {
-    Serial.println("no ACK (rejected or timed out)");
+    Serial.println("no ACK (base rejected or timed out)");
   }
 
   delay(200);
 }
+
+
+
+/*
+c 0.3 — set a steady push to feel the buzz against
+a 0.2 — turn vibration on at amplitude 0.2
+f 20, f 50, f 100, f 150 — step the frequency; amplitude stays put so you're comparing pitch at constant strength
+a 0.4 then step f again — compare strength
+sweep — hands-free walk through the frequency list; sweep again to stop
+f 0 or a 0 — buzz off, base remains
+*/

@@ -141,15 +141,20 @@ bool HapticMotorController::relax(Response_Packet* recieved)
     return send_command(packet, recieved);
 }
 
-bool HapticMotorController::vibrate(int frequency, Response_Packet* recieved)
+bool HapticMotorController::vibrate(int frequency, float amplitude, Response_Packet* recieved)
 {
-    // Vibrate at the given frequency on top of the current base mode.
+    // Vibrate on top of the current base mode.
+    // param_1 = frequency (integer Hz); param_2 = amplitude (bit-cast float).
+    uint32_t amp_bits;
+    memcpy(&amp_bits, &amplitude, sizeof(amp_bits));
+
     Command_Packet packet =
     {
         START_BYTE,
         VIBRATE,
         (uint32_t)frequency,
-        0, 0, 0, 0, 0,
+        amp_bits,
+        0, 0, 0, 0,
         END_BYTE
     };
 

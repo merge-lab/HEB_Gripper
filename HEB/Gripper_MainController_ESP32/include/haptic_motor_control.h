@@ -58,16 +58,19 @@ public:
     bool relax(Response_Packet* recieved);
 
     /*
-    Tell device to vibrate while applying base mode (constant / spring force)
+    Tell device to vibrate on top of the active base mode (constant / spring).
+    This is an overlay and does not change the base mode. Send amplitude 0
+    (or frequency 0) to stop the vibration.
     Input:
-        int frequency   - frequency in hz at which to vibrate
+        int frequency   - vibration frequency in Hz
+        float amplitude - vibration torque amplitude (0 = off)
         ResponsePacket* recieved - pointer for the response packet
             - if NULL, will not block waiting for a response (fire-and-forget)
             - if not null, filled with the response; only valid when true is returned
     Returns: true if a valid response was received (or NULL was passed,
             meaning we did not wait); false if the response was invalid/timed out
     */
-    bool vibrate(int frequency, Response_Packet* recieved);
+    bool vibrate(int frequency, float amplitude, Response_Packet* recieved);
 
 private:
     HardwareSerial* SerialConnection;         // pointer to serial connection to STM board
