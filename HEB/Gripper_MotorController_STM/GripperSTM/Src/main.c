@@ -423,27 +423,44 @@ void loop_1ms()
         0.10f * torque_command;
 
     /* ----- Vibration overlay -----
-       Added AFTER the LPF so it isn't attenuated by the ~17 Hz filter. */
+       Added AFTER the LPF so it isn't attenuated by the ~17 Hz filter.
+       The base force is clamped to leave headroom for the vibration, so the
+       buzz survives even when the base would otherwise saturate (e.g. pushing
+       hard against a stiff spring). */
+
+    const float TORQUE_MAX = 1.5f;
 
     static float vib_phase = 0.0f;
     const float TWO_PI = 6.28318530718f;
 
-    float torque_out = torque_filt;
-
+    float vib = 0.0f;
     if (vib_amplitude > 0.0f && vib_freq_hz > 0.0f) {
         vib_phase += TWO_PI * vib_freq_hz / 1000.0f;   // 1 kHz loop rate
         if (vib_phase > TWO_PI)
             vib_phase -= TWO_PI;
-        torque_out += vib_amplitude * sinf(vib_phase);
+        vib = vib_amplitude * sinf(vib_phase);
     }
 
-    /* ----- Saturation ----- */
+    // Reserve headroom for the vibration so it can't be clipped by saturation.
+    float base_limit = TORQUE_MAX - vib_amplitude;
+    if (base_limit < 0.0f)
+        base_limit = 0.0f;
 
-    if (torque_out > 1.5f)
-        torque_out = 1.5f;
+    float base = torque_filt;
+    if (base > base_limit)
+        base = base_limit;
+    if (base < -base_limit)
+        base = -base_limit;
 
-    if (torque_out < -1.5f)
-        torque_out = -1.5f;
+    float torque_out = base + vib;
+
+    /* ----- Saturation (final safety clamp) ----- */
+
+    if (torque_out > TORQUE_MAX)
+        torque_out = TORQUE_MAX;
+
+    if (torque_out < -TORQUE_MAX)
+        torque_out = -TORQUE_MAX;
 
     MC_ProgramTorqueRampMotor1_F(
         torque_out * (float)direction_correction,
