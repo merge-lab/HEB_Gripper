@@ -106,13 +106,14 @@ void CLI(HapticMotorController* motor)
     }
 
     if (ok) {
-        float torque;
-        memcpy(&torque, &resp.motor_value, sizeof(torque));
-        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] enc=%lu torque=%+.3f\n",
+        float pos_deg, torque;
+        memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
+        memcpy(&torque,  &resp.motor_value,  sizeof(torque));
+        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] pos=%+.2f torque=%+.3f\n",
                       relaxed ? "RELAX" : "ON",
                       mode == MODE_SPRING ? "spr" : "con", value,
                       vibFreq, vibAmp, sweep ? " SWEEP" : "",
-                      (unsigned long)resp.encoder_value, torque);
+                      pos_deg, torque);
     } else {
         Serial.println("no ACK (rejected or timed out)");
     }

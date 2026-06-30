@@ -222,9 +222,10 @@ void send_response(Device_Responses response) {
 	Response_Packet resp;
 	resp.startByte     = START_BYTE;
 	resp.response      = response;
-	resp.encoder_value = get_motor_enc();   // raw encoder count
-	// motor_value carries the most recent commanded torque (bit-cast float -> u32).
-	memcpy(&resp.motor_value, (const void *)&debug_torque, sizeof(resp.motor_value));
+	// DIAGNOSTIC: report position-relative-to-center (deg) and commanded torque,
+	// both bit-cast floats, so we can see the spring's behavior as the handle moves.
+	memcpy(&resp.encoder_value, (const void *)&debug_position, sizeof(resp.encoder_value));
+	memcpy(&resp.motor_value,   (const void *)&debug_torque,   sizeof(resp.motor_value));
 	resp.endByte       = END_BYTE;
 
 	memcpy(response_tx_buffer, &resp, sizeof(Response_Packet));
@@ -263,6 +264,14 @@ void handle_command(void) {
 		if (isnan(k) || isinf(k) || k < 0.0f) {
 			send_response(WRONG_PARAMS);
 			break;
+		}
+
+		// On (re)engagement - from relaxed or another mode - zero the spring
+		// center on the CURRENT handle position so it holds where you turn it on.
+		// Don't re-zero on stiffness changes / periodic re-sends, or the center
+		// would track the handle and the spring would collapse to no force.
+		if (motor_relaxed || control_type != SPRING) {
+			position_offset = (int32_t)ENCODER_M1._Super.hMecAngle;
 		}
 
 		control_type    = SPRING;
@@ -332,32 +341,25 @@ int32_t get_motor_pos() {
 }
 
 float get_motor_speed() {
+    // Called once per 1 kHz control tick, so the sample period is a fixed 1 ms.
+    // Returning the per-tick position delta (counts/ms) avoids the HAL_GetTick()
+    // 1 ms quantization, which made the old estimate alternate between 0 and
+    // spikes (delta_time_ms was 0 or 1 at this rate) - a major jitter source.
     static int32_t previous_pos = 0;
-    static uint32_t previous_tick_time = 0;
     static bool first_call = true;
 
     int32_t current_pos = get_motor_pos();
-    uint32_t current_tick_time = HAL_GetTick();
 
     if (first_call) {
         previous_pos = current_pos;
-        previous_tick_time = current_tick_time;
         first_call = false;
         return 0.0f;
     }
 
-    uint32_t delta_time_ms = current_tick_time - previous_tick_time;
     int32_t delta_position = current_pos - previous_pos;
-
     previous_pos = current_pos;
-    previous_tick_time = current_tick_time;
 
-    if (delta_time_ms == 0) {
-        return 0.0f;
-    }
-
-    float speed = (float)delta_position / (float)delta_time_ms;
-    return speed;
+    return (float)delta_position;   // counts per 1 ms tick
 }
 
 void loop_1ms()
@@ -446,19 +448,29 @@ void loop_1ms()
 
     /* ----- Torque LPF (base force only) ----- */
 
+    const float TORQUE_MAX = 1.5f;
+
     static float torque_filt = 0.0f;
 
     torque_filt =
         0.90f * torque_filt +
         0.10f * torque_command;
 
-    /* ----- Vibration overlay -----
-       Added AFTER the LPF so it isn't attenuated by the ~17 Hz filter.
-       The base force is clamped to leave headroom for the vibration, so the
-       buzz survives even when the base would otherwise saturate (e.g. pushing
-       hard against a stiff spring). */
+    // Anti-windup: clamp the LPF state itself (not just the output) so a stiff
+    // spring at large displacement can't accumulate torque far beyond the usable
+    // range and then take many cycles to unwind (which causes overshoot/jitter).
+    // Also leaves headroom for the vibration overlay so it isn't clipped.
+    float base_limit = TORQUE_MAX - vib_amplitude;
+    if (base_limit < 0.0f)
+        base_limit = 0.0f;
 
-    const float TORQUE_MAX = 1.5f;
+    if (torque_filt > base_limit)
+        torque_filt = base_limit;
+    if (torque_filt < -base_limit)
+        torque_filt = -base_limit;
+
+    /* ----- Vibration overlay -----
+       Added AFTER the LPF so it isn't attenuated by the ~17 Hz filter. */
 
     static float vib_phase = 0.0f;
     const float TWO_PI = 6.28318530718f;
@@ -471,18 +483,7 @@ void loop_1ms()
         vib = vib_amplitude * sinf(vib_phase);
     }
 
-    // Reserve headroom for the vibration so it can't be clipped by saturation.
-    float base_limit = TORQUE_MAX - vib_amplitude;
-    if (base_limit < 0.0f)
-        base_limit = 0.0f;
-
-    float base = torque_filt;
-    if (base > base_limit)
-        base = base_limit;
-    if (base < -base_limit)
-        base = -base_limit;
-
-    float torque_out = base + vib;
+    float torque_out = torque_filt + vib;
 
     /* ----- Saturation (final safety clamp) ----- */
 
