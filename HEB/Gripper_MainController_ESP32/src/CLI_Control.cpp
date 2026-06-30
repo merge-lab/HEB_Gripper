@@ -1,0 +1,121 @@
+#include "CLI_Control.h"
+
+// Send the current vibration setting and report the ACK.
+void applyVibrate(int freq, float amp, HapticMotorController* motor) {
+  Response_Packet r;
+  if (motor->vibrate(freq, amp, &r))
+    Serial.printf("  -> vibrate %d Hz, amp %.3f\n", freq, amp);
+  else
+    Serial.println("  -> vibrate no ACK (rejected? freq must be 0..400)");
+}
+
+void CLI_Setup(HapticMotorController* motor)
+{
+    bool pong = motor->ping_controller(500);
+    digitalWrite(2, pong ? HIGH : LOW);
+    Serial.println(pong ? "link up (PONG)" : "no PONG - check link");
+    Serial.println("Commands:");
+    Serial.println("  s <k>        spring base (stiffness)");
+    Serial.println("  c <t>        constant-force base (torque, signed)");
+    Serial.println("  f <hz>       set vibration frequency");
+    Serial.println("  a <amp>      set vibration amplitude (0 = off)");
+    Serial.println("  v <hz> <amp> set vibration freq + amp together");
+    Serial.println("  sweep        toggle auto frequency sweep");
+    Serial.println("  stop         relax: zero all force (also: x / relax)");
+    Serial.println("Boots relaxed - send a command to engage.");
+}
+
+void CLI(HapticMotorController* motor)
+{
+    static TestMode mode = MODE_SPRING;
+    static float value   = 0.0f;
+    static int   vibFreq = 0;
+    static float vibAmp  = 0.0f;
+    static bool  sweep   = false;
+    static bool  relaxed = true;          // boot relaxed (safe); engage on command
+    static int   sweepIdx = 0, sweepTick = 0;
+
+    if (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+
+        if (line.equalsIgnoreCase("stop") || line.equalsIgnoreCase("x") ||
+            line.equalsIgnoreCase("relax")) {
+            relaxed = true; sweep = false; value = 0.0f; vibAmp = 0.0f; vibFreq = 0;
+            Serial.println("RELAXED");
+        }
+        else if (line.equalsIgnoreCase("sweep")) {
+            relaxed = false;
+            sweep = !sweep;
+            sweepIdx = 0;
+            sweepTick = 0;
+            if (sweep && vibAmp <= 0.0f) vibAmp = 0.2f;   // need some amplitude to feel it
+            if (!sweep) applyVibrate(0, 0.0f, motor);     // stop the buzz when turning off
+            Serial.printf("sweep %s (amp %.2f)\n", sweep ? "ON" : "OFF", vibAmp);
+        }
+        else if (line.length() > 0) {
+            char ch = line.charAt(0);
+            String arg = line.substring(1);
+            arg.trim();
+
+            if (ch == 's' || ch == 'S') {
+                relaxed = false; mode = MODE_SPRING; value = arg.toFloat();
+                Serial.printf("base = spring %.3f\n", value);
+            } else if (ch == 'c' || ch == 'C') {
+                relaxed = false; mode = MODE_CONSTANT; value = arg.toFloat();
+                Serial.printf("base = constant %.3f\n", value);
+            } else if (ch == 'f' || ch == 'F') {
+                relaxed = false; sweep = false; vibFreq = arg.toInt();
+                applyVibrate(vibFreq, vibAmp, motor);
+            } else if (ch == 'a' || ch == 'A') {
+                relaxed = false; vibAmp = arg.toFloat();
+                applyVibrate(vibFreq, vibAmp, motor);
+            } else if (ch == 'v' || ch == 'V') {
+                relaxed = false; sweep = false;
+                int sp = arg.indexOf(' ');
+                vibFreq = arg.toInt();
+                vibAmp  = (sp >= 0) ? arg.substring(sp + 1).toFloat() : vibAmp;
+                applyVibrate(vibFreq, vibAmp, motor);
+            } else {
+                Serial.println("unknown command");
+            }
+        }
+    }
+
+    // Auto-sweep: advance through SWEEP_FREQS, holding the current amplitude.
+    if (!relaxed && sweep && vibAmp > 0.0f) {
+        if (sweepTick == 0) {
+            vibFreq = SWEEP_FREQS[sweepIdx];
+            applyVibrate(vibFreq, vibAmp, motor);
+        }
+        if (++sweepTick >= SWEEP_HOLD) {
+            sweepTick = 0;
+            sweepIdx = (sweepIdx + 1) % SWEEP_COUNT;
+        }
+    }
+
+    // Each cycle: re-send relax (when stopped) or the active base command. This
+    // also serves as the heartbeat that keeps the STM's fail-safe from firing.
+    Response_Packet resp;
+    bool ok;
+    if (relaxed) {
+        ok = motor->relax(&resp);
+    } else {
+        ok = (mode == MODE_SPRING) ? motor->set_spring_force(value, &resp)
+                                   : motor->set_constant_force(value, &resp);
+    }
+
+    if (ok) {
+        float torque;
+        memcpy(&torque, &resp.motor_value, sizeof(torque));
+        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] enc=%lu torque=%+.3f\n",
+                      relaxed ? "RELAX" : "ON",
+                      mode == MODE_SPRING ? "spr" : "con", value,
+                      vibFreq, vibAmp, sweep ? " SWEEP" : "",
+                      (unsigned long)resp.encoder_value, torque);
+    } else {
+        Serial.println("no ACK (rejected or timed out)");
+    }
+
+    delay(200);
+}
