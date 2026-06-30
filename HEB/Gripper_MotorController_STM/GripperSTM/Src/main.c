@@ -53,6 +53,11 @@ const int RAMP_WIDTH = 8;
 // Deterministic replacement for the old detect_motor_direction() auto-cal.
 // If the spring pushes the wrong way, flip this between 1 and -1 and reflash.
 #define MOTOR_DIRECTION     (1)
+
+// Fail-safe: if no command is received within this window, relax the motor.
+// The ESP32 re-sends its active command ~every 200 ms, so this also acts as a
+// heartbeat: lose the link (or the ESP32) and the motor goes limp on its own.
+#define HEARTBEAT_TIMEOUT_MS  500
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -105,6 +110,10 @@ volatile ControlType control_type;
 // Vibration overlay (added on top of the active base mode). 0 amplitude = off.
 volatile float vib_freq_hz = 0.0f;
 volatile float vib_amplitude = 0.0f;
+
+// Relax / heartbeat state. Boot relaxed (no torque) until commanded.
+volatile bool motor_relaxed = true;
+volatile uint32_t last_command_ms = 0;
 int16_t direction_correction = 1;
 
 volatile float debug_position = 0;
@@ -213,10 +222,9 @@ void send_response(Device_Responses response) {
 	Response_Packet resp;
 	resp.startByte     = START_BYTE;
 	resp.response      = response;
-	// DIAGNOSTIC: report the control loop's position (deg) and commanded torque,
-	// both bit-cast floats, so the ESP32 can stream them while the handle moves.
-	memcpy(&resp.encoder_value, (const void *)&debug_position, sizeof(resp.encoder_value));
-	memcpy(&resp.motor_value,   (const void *)&debug_torque,   sizeof(resp.motor_value));
+	resp.encoder_value = get_motor_enc();   // raw encoder count
+	// motor_value carries the most recent commanded torque (bit-cast float -> u32).
+	memcpy(&resp.motor_value, (const void *)&debug_torque, sizeof(resp.motor_value));
 	resp.endByte       = END_BYTE;
 
 	memcpy(response_tx_buffer, &resp, sizeof(Response_Packet));
@@ -238,6 +246,9 @@ void handle_command(void) {
 		return;
 	}
 
+	// Any valid command counts as a heartbeat (keeps the fail-safe from firing).
+	last_command_ms = HAL_GetTick();
+
 	switch (cmd.command) {
 	case PING:
 		send_response(PONG);
@@ -254,8 +265,9 @@ void handle_command(void) {
 			break;
 		}
 
-		control_type   = SPRING;
+		control_type    = SPRING;
 		torque_setpoint = k;       // used as kp by the 1 kHz spring loop
+		motor_relaxed   = false;   // engage
 		send_response(ACK);
 		break;
 	}
@@ -271,8 +283,9 @@ void handle_command(void) {
 			break;
 		}
 
-		control_type          = CONSTANT;
+		control_type            = CONSTANT;
 		constant_force_setpoint = f;
+		motor_relaxed           = false;   // engage
 		send_response(ACK);
 		break;
 	}
@@ -296,7 +309,14 @@ void handle_command(void) {
 		break;
 	}
 
-	// RELAX to be implemented next.
+	case RELAX:
+		// End all intentional force. The control loop ramps torque to 0 and
+		// the vibration overlay is disabled.
+		motor_relaxed = true;
+		vib_amplitude = 0.0f;
+		send_response(ACK);
+		break;
+
 	default:
 		send_response(NOT_RECOGNIZED);
 		break;
@@ -390,11 +410,21 @@ void loop_1ms()
             spring_error += pos_deadband;
     }
 
+    /* ----- Relax / heartbeat gate ----- */
+    // Motor produces force only when engaged AND we've heard from the ESP32
+    // recently. Otherwise torque_command is 0 and the LPF ramps output to zero.
+    bool active = !motor_relaxed &&
+                  ((HAL_GetTick() - last_command_ms) < HEARTBEAT_TIMEOUT_MS);
+
     /* ----- Control law (depends on mode) ----- */
 
     float torque_command;
 
-    if (control_type == CONSTANT)
+    if (!active)
+    {
+        torque_command = 0.0f;
+    }
+    else if (control_type == CONSTANT)
     {
         // Open-loop constant torque, independent of position.
         torque_command = constant_force_setpoint;
@@ -434,7 +464,7 @@ void loop_1ms()
     const float TWO_PI = 6.28318530718f;
 
     float vib = 0.0f;
-    if (vib_amplitude > 0.0f && vib_freq_hz > 0.0f) {
+    if (active && vib_amplitude > 0.0f && vib_freq_hz > 0.0f) {
         vib_phase += TWO_PI * vib_freq_hz / 1000.0f;   // 1 kHz loop rate
         if (vib_phase > TWO_PI)
             vib_phase -= TWO_PI;
