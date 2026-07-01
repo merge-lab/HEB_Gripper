@@ -60,9 +60,11 @@ typedef struct
 {
     char             startByte;     // packet start
     uint8_t          response;      // a Device_Responses value (fixed width, see above)
-    uint32_t         encoder_value; // current encoder reading, cast as needed
-    uint32_t         motor_value;   // current value being sent to motor, cast as needed
-    char             endByte;       // packet end
+    uint32_t         encoder_value;   // current encoder reading, cast as needed
+    uint32_t         motor_value;     // commanded torque being sent to motor, cast as needed
+    uint32_t         measured_torque; // measured motor torque (Iq, Amperes), bit-cast float
+    uint32_t         user_torque;     // estimated user torque on trigger, bit-cast float
+    char             endByte;         // packet end
 } Response_Packet;
 #pragma pack(pop)
 

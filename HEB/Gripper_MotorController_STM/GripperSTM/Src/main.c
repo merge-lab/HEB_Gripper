@@ -120,6 +120,8 @@ volatile float debug_position = 0;
 volatile float debug_speed = 0;
 volatile bool debug_ready = false;
 volatile float debug_torque = 0;
+volatile float debug_motor_torque = 0;  // measured Iq (A): actual motor torque -> trigger
+volatile float debug_user_torque  = 0;  // estimated user torque on trigger (A-equivalent)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -224,8 +226,10 @@ void send_response(Device_Responses response) {
 	resp.response      = response;
 	// DIAGNOSTIC: report position-relative-to-center (deg) and commanded torque,
 	// both bit-cast floats, so we can see the spring's behavior as the handle moves.
-	memcpy(&resp.encoder_value, (const void *)&debug_position, sizeof(resp.encoder_value));
-	memcpy(&resp.motor_value,   (const void *)&debug_torque,   sizeof(resp.motor_value));
+	memcpy(&resp.encoder_value,   (const void *)&debug_position,     sizeof(resp.encoder_value));
+	memcpy(&resp.motor_value,     (const void *)&debug_torque,       sizeof(resp.motor_value));
+	memcpy(&resp.measured_torque, (const void *)&debug_motor_torque, sizeof(resp.measured_torque));
+	memcpy(&resp.user_torque,     (const void *)&debug_user_torque,  sizeof(resp.user_torque));
 	resp.endByte       = END_BYTE;
 
 	memcpy(response_tx_buffer, &resp, sizeof(Response_Packet));
@@ -497,6 +501,26 @@ void loop_1ms()
         torque_out * (float)direction_correction,
         0);
 
+    /* ----- Measured torque & user-torque estimate -----
+       Iq (quadrature current) is what the motor actually produced this cycle, in
+       Amperes and proportional to torque. Bring it back into the trigger sign
+       convention used by the command (see direction_correction above). */
+    qd_f_t iqd = MC_GetIqdMotor1_F();
+    float motor_torque = iqd.q * (float)direction_correction;   // A) actual motor torque
+
+    /* User torque from the trigger's equation of motion:
+         J*alpha = tau_motor + tau_user - b*omega - friction
+       => tau_user ~= -tau_motor + J*alpha + b*omega
+       Quasi-static (holding steady) this reduces to tau_user ~= -tau_motor, i.e. the
+       user pushes equal-and-opposite to the motor. J_EST/B_EST default to 0; raise
+       them (via force-sensor calibration) to correct for inertia/damping during motion. */
+    static float prev_speed = 0.0f;
+    float alpha = (speed_filt - prev_speed) * 1000.0f;          // deg/s^2 at the 1 kHz rate
+    prev_speed = speed_filt;
+    const float J_EST = 0.0f;   // inertia term (tune later)
+    const float B_EST = 0.0f;   // viscous damping term (tune later)
+    float user_torque = -motor_torque + J_EST * alpha + B_EST * speed_filt;   // B) user torque
+
     /* ----- Debug ----- */
 
     static uint32_t counter = 0;
@@ -507,6 +531,8 @@ void loop_1ms()
         debug_position = pos_deg;
         debug_speed = speed_filt;
         debug_torque = torque_filt;
+        debug_motor_torque = motor_torque;
+        debug_user_torque  = user_torque;
         debug_ready = true;
     }
 // OLD VERSION OF THE SPRING LOOP

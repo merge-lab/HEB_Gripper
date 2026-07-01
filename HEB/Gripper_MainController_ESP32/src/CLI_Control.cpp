@@ -9,6 +9,39 @@ void applyVibrate(int freq, float amp, HapticMotorController* motor) {
     Serial.println("  -> vibrate no ACK (rejected? freq must be 0..400)");
 }
 
+// Ramp constant force 0.0 -> 1.5 in 0.1 steps, holding each level for a short
+// while (re-sending inside the STM's 500 ms heartbeat window) and printing the
+// response. Relaxes the motor on completion. Blocking - returns when done.
+void force_ramp_up(HapticMotorController* motor) {
+  const int   STEPS       = 15;   // 0.0 .. 1.5 in 0.1 increments (integer count avoids float drift)
+  const int   HOLD_CYCLES = 8;    // ~1.6 s per level at 200 ms/cycle (< 500 ms heartbeat per send)
+
+  Serial.println("RAMP UP: constant force 0.00 -> 1.50 in 0.10 steps");
+
+  for (int step = 0; step <= STEPS; step++) {
+    float force = step * 0.1f;
+
+    for (int i = 0; i < HOLD_CYCLES; i++) {
+      Response_Packet resp;
+      if (motor->set_constant_force(-force, &resp)) {
+        float pos_deg, torque, motor_t, user_t;
+        memcpy(&pos_deg, &resp.encoder_value,   sizeof(pos_deg));
+        memcpy(&torque,  &resp.motor_value,     sizeof(torque));
+        memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
+        memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
+        Serial.printf("[RAMP con] set=%+.3f pos=%+.2f cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
+                      force, pos_deg, torque, motor_t, user_t);
+      } else {
+        Serial.println("no ACK (rejected or timed out)");
+      }
+      delay(200);
+    }
+  }
+
+  motor->relax(NULL);
+  Serial.println("RAMP UP complete - relaxed");
+}
+
 void CLI_Setup(HapticMotorController* motor)
 {
     bool pong = motor->ping_controller(500);
@@ -21,6 +54,7 @@ void CLI_Setup(HapticMotorController* motor)
     Serial.println("  a <amp>      set vibration amplitude (0 = off)");
     Serial.println("  v <hz> <amp> set vibration freq + amp together");
     Serial.println("  sweep        toggle auto frequency sweep");
+    Serial.println("  rampup       test: ramp constant force 0.0 -> 1.5 by 0.1");
     Serial.println("  stop         relax: zero all force (also: x / relax)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
@@ -43,6 +77,12 @@ void CLI(HapticMotorController* motor)
             line.equalsIgnoreCase("relax")) {
             relaxed = true; sweep = false; value = 0.0f; vibAmp = 0.0f; vibFreq = 0;
             Serial.println("RELAXED");
+        }
+        else if (line.equalsIgnoreCase("rampup")) {
+            force_ramp_up(motor);
+            // force_ramp_up leaves the motor relaxed; keep the CLI state in sync
+            // so it doesn't immediately re-engage the previous base command.
+            relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.equalsIgnoreCase("sweep")) {
             relaxed = false;
@@ -106,14 +146,17 @@ void CLI(HapticMotorController* motor)
     }
 
     if (ok) {
-        float pos_deg, torque;
-        memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
-        memcpy(&torque,  &resp.motor_value,  sizeof(torque));
-        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] pos=%+.2f torque=%+.3f\n",
+        float pos_deg, torque, motor_t, user_t;
+        memcpy(&pos_deg, &resp.encoder_value,   sizeof(pos_deg));
+        memcpy(&torque,  &resp.motor_value,     sizeof(torque));
+        memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
+        memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
+        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
                       relaxed ? "RELAX" : "ON",
                       mode == MODE_SPRING ? "spr" : "con", value,
                       vibFreq, vibAmp, sweep ? " SWEEP" : "",
-                      pos_deg, torque);
+                      relaxed ? 0.0f : value,
+                      pos_deg, torque, motor_t, user_t);
     } else {
         Serial.println("no ACK (rejected or timed out)");
     }

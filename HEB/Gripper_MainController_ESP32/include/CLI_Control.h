@@ -32,4 +32,11 @@ CLI Tool with debugging prints in case vibrate fails
 */
 void applyVibrate(int freq, float amp, HapticMotorController* motor);
 
+/*
+Test routine: ramp constant force from 0.0 up to 1.5 in 0.1 steps, holding each
+level briefly and printing the response. Triggered by the 'rampup' command.
+Leaves the motor relaxed when done.
+*/
+void force_ramp_up(HapticMotorController* motor);
+
 #endif
