@@ -64,6 +64,7 @@ typedef struct
     uint32_t         motor_value;     // commanded torque being sent to motor, cast as needed
     uint32_t         measured_torque; // measured motor torque (Iq, Amperes), bit-cast float
     uint32_t         user_torque;     // estimated user torque on trigger, bit-cast float
+    uint32_t         raw_encoder;     // raw encoder counter (TIM4 CNT), plain integer count
     char             endByte;         // packet end
 } Response_Packet;
 #pragma pack(pop)

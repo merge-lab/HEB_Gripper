@@ -29,8 +29,9 @@ void force_ramp_up(HapticMotorController* motor) {
         memcpy(&torque,  &resp.motor_value,     sizeof(torque));
         memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
         memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
-        Serial.printf("[RAMP con] set=%+.3f pos=%+.2f cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
-                      force, pos_deg, torque, motor_t, user_t);
+        unsigned long raw_enc = (unsigned long)resp.raw_encoder;
+        Serial.printf("[RAMP con] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
+                      force, pos_deg, raw_enc, torque, motor_t, user_t);
       } else {
         Serial.println("no ACK (rejected or timed out)");
       }
@@ -151,12 +152,13 @@ void CLI(HapticMotorController* motor)
         memcpy(&torque,  &resp.motor_value,     sizeof(torque));
         memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
         memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
-        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
+        unsigned long raw_enc = (unsigned long)resp.raw_encoder;   // raw counter, plain integer
+        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
                       relaxed ? "RELAX" : "ON",
                       mode == MODE_SPRING ? "spr" : "con", value,
                       vibFreq, vibAmp, sweep ? " SWEEP" : "",
                       relaxed ? 0.0f : value,
-                      pos_deg, torque, motor_t, user_t);
+                      pos_deg, raw_enc, torque, motor_t, user_t);
     } else {
         Serial.println("no ACK (rejected or timed out)");
     }

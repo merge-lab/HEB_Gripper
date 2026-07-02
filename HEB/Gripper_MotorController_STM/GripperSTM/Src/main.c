@@ -230,6 +230,7 @@ void send_response(Device_Responses response) {
 	memcpy(&resp.motor_value,     (const void *)&debug_torque,       sizeof(resp.motor_value));
 	memcpy(&resp.measured_torque, (const void *)&debug_motor_torque, sizeof(resp.measured_torque));
 	memcpy(&resp.user_torque,     (const void *)&debug_user_torque,  sizeof(resp.user_torque));
+	resp.raw_encoder   = get_motor_enc();   // raw hardware counter, no bit-cast (it's an integer)
 	resp.endByte       = END_BYTE;
 
 	memcpy(response_tx_buffer, &resp, sizeof(Response_Packet));
