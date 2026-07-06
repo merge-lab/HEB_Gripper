@@ -127,6 +127,13 @@ bool HapticMotorController::set_constant_force(float force, Response_Packet* rec
     return send_command(packet, recieved);
 }
 
+bool HapticMotorController::set_constant_newton_force(float force, Response_Packet* recieved)
+{
+    // Newtons = 3.18x -.122
+    float newtons = (force + 0.122) / 3.18;
+    return set_constant_force(newtons, recieved);
+}
+
 bool HapticMotorController::relax(Response_Packet* recieved)
 {
     // RELAX takes no params; end all intentional force.

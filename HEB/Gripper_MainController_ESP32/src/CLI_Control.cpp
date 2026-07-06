@@ -51,6 +51,7 @@ void CLI_Setup(HapticMotorController* motor)
     Serial.println("Commands:");
     Serial.println("  s <k>        spring base (stiffness)");
     Serial.println("  c <t>        constant-force base (torque, signed)");
+    Serial.println("  n <N>        constant force in Newtons (lateral tip force)");
     Serial.println("  f <hz>       set vibration frequency");
     Serial.println("  a <amp>      set vibration amplitude (0 = off)");
     Serial.println("  v <hz> <amp> set vibration freq + amp together");
@@ -105,6 +106,10 @@ void CLI(HapticMotorController* motor)
             } else if (ch == 'c' || ch == 'C') {
                 relaxed = false; mode = MODE_CONSTANT; value = -arg.toFloat();
                 Serial.printf("base = constant %.3f\n", value);
+            } else if (ch == 'n' || ch == 'N') {
+                float N = arg.toFloat();
+                relaxed = false; mode = MODE_CONSTANT; value = -(N + 0.122f) / 3.18f;
+                Serial.printf("base = %.3f N (unitless %+.3f)\n", N, value);
             } else if (ch == 'f' || ch == 'F') {
                 relaxed = false; sweep = false; vibFreq = arg.toInt();
                 applyVibrate(vibFreq, vibAmp, motor);
