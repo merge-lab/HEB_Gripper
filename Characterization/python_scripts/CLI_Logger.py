@@ -63,11 +63,13 @@ DEFAULT_BAUD = 115200
 # Substrings that hint a port is the ESP32-S3 (native USB CDC / common bridges).
 PORT_HINTS = ("usb", "cdc", "cp210", "ch340", "ch910", "esp", "espressif", "serial")
 
-# Matches the structured ESP32 status line, e.g.:
-#   [RELAX | spr 0.00 | vib 0Hz 0.00] set=+0.000 pos=+7.60 enc=173 cmd=-0.000 motorT=-0.018 userT=+0.018
+# Matches the structured ESP32 status line in all modes, e.g.:
+#   [RELAX | spr 0.00 | vib 0Hz 0.00] set=+0.000 pos=+7.60 enc=173 ...
+#   [ON    | con 0.50 | vib 0Hz 0.00] set=+0.500 pos=+7.60 enc=173 ...  (constant force)
+#   [ON    | spr 1.00 | vib 50Hz 0.20 SWEEP] ...                         (sweep active)
 STATUS_RE = re.compile(
-    r"\[(?P<mode>\w+)\s*\|\s*spr\s*(?P<spr_k>[+-]?\d+\.\d+)\s*\|"
-    r"\s*vib\s*(?P<vib_hz>\d+)Hz\s*(?P<vib_amp>[+-]?\d+\.\d+)\]"
+    r"\[(?P<mode>\w+)\s*\|\s*(?:spr|con)\s*(?P<base_val>[+-]?\d+\.\d+)\s*\|"
+    r"\s*vib\s*(?P<vib_hz>\d+)Hz\s*(?P<vib_amp>[+-]?\d+\.\d+)(?:\s+SWEEP)?\]"
     r"\s*set=(?P<setpoint>[+-]?\d+\.\d+)"
     r"\s*pos=(?P<position_deg>[+-]?\d+\.\d+)"
     r"\s*enc=(?P<encoder>[+-]?\d+)"
@@ -76,8 +78,9 @@ STATUS_RE = re.compile(
     r"\s*userT=(?P<user_torque>[+-]?\d+\.\d+)"
 )
 
+# base_val = spring stiffness k in spring mode, constant force (A) in constant mode
 CSV_HEADER = [
-    "timestamp", "mode", "spr_k", "vib_hz", "vib_amp",
+    "timestamp", "mode", "base_val", "vib_hz", "vib_amp",
     "setpoint_A", "position_deg", "encoder",
     "cmd_torque_A", "motor_torque_A", "user_torque_A",
 ]
@@ -123,32 +126,48 @@ def pick_port():
 
 def reader_loop(ser, log_fh, csv_writer, add_timestamps, stop_event):
     """Read lines from the serial port; print them and write parsed rows to CSV."""
+    # Buffer bytes manually so USB CDC packet splits never produce half-lines.
+    # ser.readline() with a timeout returns partial data when a \n spans two
+    # USB packets; reading into a byte buffer and splitting on \n avoids that.
+    buf = b""
+    rows_written = 0
     while not stop_event.is_set():
         try:
-            raw = ser.readline()  # blocks up to ser.timeout
+            # Drain whatever is in the OS buffer; block for at least 1 byte
+            # so the loop doesn't spin at 100 % CPU when idle.
+            chunk = ser.read(max(1, ser.in_waiting))
         except serial.SerialException as e:
             print(f"\n[serial read error: {e}]")
             stop_event.set()
             break
-        if not raw:
+        if not chunk:
             continue  # timeout with no data
 
-        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-        print(line)
+        buf += chunk
+        while b"\n" in buf:
+            raw, buf = buf.split(b"\n", 1)
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
 
-        m = STATUS_RE.search(line)
-        if not m:
-            continue  # boot messages, echo lines, etc. — skip from CSV
+            m = STATUS_RE.search(line)
+            if m:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if add_timestamps else ""
+                g = m.groupdict()
+                try:
+                    csv_writer.writerow([
+                        ts,
+                        g["mode"], g["base_val"], g["vib_hz"], g["vib_amp"],
+                        g["setpoint"], g["position_deg"], g["encoder"],
+                        g["cmd_torque"], g["motor_torque"], g["user_torque"],
+                    ])
+                    log_fh.flush()
+                    rows_written += 1
+                    if rows_written % 50 == 0:
+                        print(f"[CSV: {rows_written} rows written]")
+                except Exception as e:
+                    print(f"\n[CSV write error ({type(e).__name__}): {e}]")
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if add_timestamps else ""
-        g = m.groupdict()
-        csv_writer.writerow([
-            ts,
-            g["mode"], g["spr_k"], g["vib_hz"], g["vib_amp"],
-            g["setpoint"], g["position_deg"], g["encoder"],
-            g["cmd_torque"], g["motor_torque"], g["user_torque"],
-        ])
-        log_fh.flush()
+            # Print after write so the CSV row is safe even if print is slow.
+            print(line)
 
 
 def main():
