@@ -103,7 +103,7 @@ void CLI(HapticMotorController* motor)
                 relaxed = false; mode = MODE_SPRING; value = arg.toFloat();
                 Serial.printf("base = spring %.3f\n", value);
             } else if (ch == 'c' || ch == 'C') {
-                relaxed = false; mode = MODE_CONSTANT; value = arg.toFloat();
+                relaxed = false; mode = MODE_CONSTANT; value = -arg.toFloat();
                 Serial.printf("base = constant %.3f\n", value);
             } else if (ch == 'f' || ch == 'F') {
                 relaxed = false; sweep = false; vibFreq = arg.toInt();
