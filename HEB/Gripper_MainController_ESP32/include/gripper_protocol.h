@@ -1,5 +1,5 @@
-#ifndef GRIPPER_PROTOCOL_H
-#define GRIPPER_PROTOCOL_H
+#ifndef ESP_STM_PROTOCOL_H
+#define ESP_STM_PROTOCOL_H
 
 // =============================================================================
 // Shared wire protocol between the ESP32 main controller and the STM32 motor

@@ -43,8 +43,9 @@ void force_ramp_up(HapticMotorController* motor) {
   Serial.println("RAMP UP complete - relaxed");
 }
 
-void CLI_Setup(HapticMotorController* motor)
+void CLI_Setup(HapticMotorController* motor, FORTE_Fingers* forte)
 {
+    (void)forte;  // stored for CLI(); not needed at setup time
     bool pong = motor->ping_controller(500);
     digitalWrite(2, pong ? HIGH : LOW);
     Serial.println(pong ? "link up (PONG)" : "no PONG - check link");
@@ -61,7 +62,7 @@ void CLI_Setup(HapticMotorController* motor)
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
-void CLI(HapticMotorController* motor)
+void CLI(HapticMotorController* motor, FORTE_Fingers* forte)
 {
     static TestMode mode = MODE_SPRING;
     static float value   = 0.0f;
@@ -157,13 +158,23 @@ void CLI(HapticMotorController* motor)
         memcpy(&torque,  &resp.motor_value,     sizeof(torque));
         memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
         memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
-        unsigned long raw_enc = (unsigned long)resp.raw_encoder;   // raw counter, plain integer
-        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
+        unsigned long raw_enc = (unsigned long)resp.raw_encoder;
+
+        FORTE_Reading fr;
+        bool have_forte = forte && forte->get_latest(fr);
+        float forte_force = have_forte ? fr.force : 0.f;
+
+        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f force=%.3f\n",
                       relaxed ? "RELAX" : "ON",
                       mode == MODE_SPRING ? "spr" : "con", value,
                       vibFreq, vibAmp, sweep ? " SWEEP" : "",
                       relaxed ? 0.0f : value,
-                      pos_deg, raw_enc, torque, motor_t, user_t);
+                      pos_deg, raw_enc, torque, motor_t, user_t, forte_force);
+
+        if (have_forte && fr.slip) {
+            Serial.println("  [SLIP] haptic alert");
+            motor->vibrate(FF_SLIP_VIB_FREQ, FF_SLIP_VIB_AMP, nullptr);
+        }
     } else {
         Serial.println("no ACK (rejected or timed out)");
     }

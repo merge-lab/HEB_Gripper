@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "haptic_motor_control.h"
+#include "FORTE_Fingers.h"
 
 enum TestMode { MODE_SPRING, MODE_CONSTANT };
 
@@ -14,7 +15,7 @@ const int SWEEP_HOLD    = 8;   // ~200 ms loop cycles to hold each step (~1.6 s)
 /*
 Used to setup CLI testing mode, put into void setup
 */
-void CLI_Setup(HapticMotorController* motor);
+void CLI_Setup(HapticMotorController* motor, FORTE_Fingers* forte);
 
 /*
 Serial CLI tool for sending and testing commands
@@ -25,7 +26,7 @@ a 0.4 then step f again — compare strength
 sweep — hands-free walk through the frequency list; sweep again to stop
 f 0 or a 0 — buzz off, base remains
 */
-void CLI(HapticMotorController* motor);
+void CLI(HapticMotorController* motor, FORTE_Fingers* forte);
 
 /*
 CLI Tool with debugging prints in case vibrate fails
