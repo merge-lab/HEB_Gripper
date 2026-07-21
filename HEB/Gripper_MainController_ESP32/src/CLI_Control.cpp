@@ -43,25 +43,90 @@ void force_ramp_up(HapticMotorController* motor) {
   Serial.println("RAMP UP complete - relaxed");
 }
 
-void CLI_Setup(HapticMotorController* motor)
+void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
+{
+    const float TRIGGER_RANGE = 40.0f;  // open - close is always 47 degrees
+
+    // Read the current position as the closed baseline (trigger starts closed).
+    // Retry until the STM32 responds — it may still be booting.
+    float POS_CLOSE = 0.0f;
+    {
+        Response_Packet init_resp;
+        while (!motor->set_constant_force(-1.5f, &init_resp))
+            delay(200);
+        memcpy(&POS_CLOSE, &init_resp.encoder_value, sizeof(POS_CLOSE));
+    }
+    float POS_OPEN = POS_CLOSE - TRIGGER_RANGE;
+
+    Serial.printf("Trigger mapping ON: close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
+                  POS_CLOSE, POS_OPEN);
+
+    while (true)
+    {
+        // Exit check — non-blocking
+        if (Serial.available())
+        {
+            String line = Serial.readStringUntil('\n');
+            line.trim();
+            if (line.equalsIgnoreCase("e"))
+            {
+                motor->relax(nullptr);
+                if (gripper) gripper->stop(nullptr);
+                Serial.println("Trigger mapping OFF.");
+                return;
+            }
+        }
+
+        // Drive haptic at constant force 1.5 and read back the encoder position.
+        Response_Packet resp;
+        bool ok = motor->set_constant_force(-1.5f, &resp);
+
+        if (!ok)
+        {
+            Serial.println("[TM] no ACK from haptic motor");
+            delay(200);
+            continue;
+        }
+
+        float pos_deg;
+        memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
+
+        // Map trigger position to a 0-1 value: 0 = fully closed, 1 = fully open.
+        float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+
+        // Interpolate servo angles.
+        float left_deg  = 90.0f * (1.0f - t);  // 90 (closed) -> 0 (open)
+        float right_deg = 90.0f + 90.0f * t;   // 90 (closed) -> 180 (open)
+
+        if (gripper)
+            gripper->move_servo_fast(left_deg, right_deg);
+
+        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
+                      pos_deg, t, left_deg, right_deg);
+
+        delay(15);  // pace to ~50 Hz; gives Arduino clean time to receive each packet
+    }
+}
+
+void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 {
     bool pong = motor->ping_controller(500);
     digitalWrite(2, pong ? HIGH : LOW);
-    Serial.println(pong ? "link up (PONG)" : "no PONG - check link");
-    Serial.println("Commands:");
-    Serial.println("  s <k>        spring base (stiffness)");
-    Serial.println("  c <t>        constant-force base (torque, signed)");
-    Serial.println("  n <N>        constant force in Newtons (lateral tip force)");
-    Serial.println("  f <hz>       set vibration frequency");
-    Serial.println("  a <amp>      set vibration amplitude (0 = off)");
-    Serial.println("  v <hz> <amp> set vibration freq + amp together");
-    Serial.println("  sweep        toggle auto frequency sweep");
-    Serial.println("  rampup       test: ramp constant force 0.0 -> 1.5 by 0.1");
-    Serial.println("  stop         relax: zero all force (also: x / relax)");
+    Serial.println(pong ? "haptic link up (PONG)" : "haptic no PONG - check link");
+
+    if (gripper) {
+        bool gpong = gripper->ping(300);
+        Serial.println(gpong ? "gripper link up (PONG)" : "gripper no PONG - check link");
+    }
+
+    Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
+    Serial.println("Gripper: m <l> <r> [spd]   gstop   gping");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
-void CLI(HapticMotorController* motor)
+void CLI(HapticMotorController* motor, DynamixelController* gripper)
 {
     static TestMode mode = MODE_SPRING;
     static float value   = 0.0f;
@@ -95,6 +160,11 @@ void CLI(HapticMotorController* motor)
             if (!sweep) applyVibrate(0, 0.0f, motor);     // stop the buzz when turning off
             Serial.printf("sweep %s (amp %.2f)\n", sweep ? "ON" : "OFF", vibAmp);
         }
+        else if (line.equalsIgnoreCase("tm")) {
+            trigger_mapping(motor, gripper);
+            // trigger_mapping leaves the motor relaxed; sync CLI state.
+            relaxed = true; sweep = false; value = 0.0f;
+        }
         else if (line.length() > 0) {
             char ch = line.charAt(0);
             String arg = line.substring(1);
@@ -122,6 +192,29 @@ void CLI(HapticMotorController* motor)
                 vibFreq = arg.toInt();
                 vibAmp  = (sp >= 0) ? arg.substring(sp + 1).toFloat() : vibAmp;
                 applyVibrate(vibFreq, vibAmp, motor);
+            } else if ((ch == 'm' || ch == 'M') && gripper) {
+                // m <left_deg> <right_deg> [speed_rpm]
+                int sp1 = arg.indexOf(' ');
+                int sp2 = (sp1 >= 0) ? arg.indexOf(' ', sp1 + 1) : -1;
+                float l_deg = arg.toFloat();
+                float r_deg = (sp1 >= 0) ? arg.substring(sp1 + 1).toFloat() : l_deg;
+                float spd   = (sp2 >= 0) ? arg.substring(sp2 + 1).toFloat() : 0.0f;
+                Dyn_Response_Packet resp;
+                bool ok = gripper->move_servo(l_deg, r_deg, spd, spd, &resp);
+                float lmA, rmA;
+                memcpy(&lmA, &resp.left_motor_current,  sizeof(lmA));
+                memcpy(&rmA, &resp.right_motor_current, sizeof(rmA));
+                Serial.printf("move L=%.1f R=%.1f spd=%.0f -> %s (L=%.0fmA R=%.0fmA)\n",
+                              l_deg, r_deg, spd,
+                              ok ? (resp.response == DYN_ACK ? "ACK" : "FAIL") : "no resp",
+                              lmA, rmA);
+            } else if (line.equalsIgnoreCase("gstop") && gripper) {
+                Dyn_Response_Packet resp;
+                bool ok = gripper->stop(&resp);
+                Serial.println(ok ? "gripper STOP ACK" : "gripper STOP no resp");
+            } else if (line.equalsIgnoreCase("gping") && gripper) {
+                bool ok = gripper->ping(300);
+                Serial.println(ok ? "gripper PONG" : "gripper no PONG");
             } else {
                 Serial.println("unknown command");
             }

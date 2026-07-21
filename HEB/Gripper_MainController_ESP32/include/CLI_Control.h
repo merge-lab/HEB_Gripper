@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "haptic_motor_control.h"
+#include "dynamixel_control.h"
 
 enum TestMode { MODE_SPRING, MODE_CONSTANT };
 
@@ -14,18 +15,34 @@ const int SWEEP_HOLD    = 8;   // ~200 ms loop cycles to hold each step (~1.6 s)
 /*
 Used to setup CLI testing mode, put into void setup
 */
-void CLI_Setup(HapticMotorController* motor);
+// gripper may be nullptr if the Dynamixel link is not wired up yet.
+void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper = nullptr);
+
+// Maps trigger position to gripper open/close angle in a continuous loop.
+// Haptic runs at constant force 1.5. Type 'e' + Enter to exit.
+void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper);
 
 /*
 Serial CLI tool for sending and testing commands
-c 0.3 — set a steady push to feel the buzz against
-a 0.2 — turn vibration on at amplitude 0.2
-f 20, f 50, f 100, f 150 — step the frequency; amplitude stays put so you're comparing pitch at constant strength
-a 0.4 then step f again — compare strength
-sweep — hands-free walk through the frequency list; sweep again to stop
-f 0 or a 0 — buzz off, base remains
+
+Haptic motor:
+  s <k>        spring base (stiffness)
+  c <t>        constant-force base (torque, signed)
+  n <N>        constant force in Newtons (lateral tip force)
+  f <hz>       set vibration frequency
+  a <amp>      set vibration amplitude (0 = off)
+  v <hz> <amp> set vibration freq + amp together
+  sweep        toggle auto frequency sweep
+  rampup       test: ramp constant force 0.0 -> 1.5 by 0.1
+  stop         relax: zero all force (also: x / relax)
+
+Gripper (Dynamixel):
+  m <l> <r>          move to l/r degrees at default speed
+  m <l> <r> <spd>    move to l/r degrees at spd RPM
+  gstop              torque off both servos
+  gping              ping the Arduino gripper board
 */
-void CLI(HapticMotorController* motor);
+void CLI(HapticMotorController* motor, DynamixelController* gripper = nullptr);
 
 /*
 CLI Tool with debugging prints in case vibrate fails
