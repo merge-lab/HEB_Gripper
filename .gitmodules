@@ -1,0 +1,3 @@
+[submodule "MERGeLab-HEB-universal_manipulation_interface"]
+	path = MERGeLab-HEB-universal_manipulation_interface
+	url = git@github.com:merge-lab/MERGeLab-HEB-universal_manipulation_interface.git
