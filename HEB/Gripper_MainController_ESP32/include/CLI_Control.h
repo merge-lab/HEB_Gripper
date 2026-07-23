@@ -22,6 +22,10 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper = null
 // Haptic runs at constant force 1.5. Type 'e' + Enter to exit.
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper);
 
+// Manual haptic update loop. Input '<norm_force> <norm_slip>' to set values.
+// 'd' toggles Dynamixel actuation from trigger, 'e' exits.
+void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripper);
+
 /*
 Serial CLI tool for sending and testing commands
 

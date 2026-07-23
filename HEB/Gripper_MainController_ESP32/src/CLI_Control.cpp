@@ -111,6 +111,100 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
     }
 }
 
+void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripper)
+{
+    const float TRIGGER_RANGE = 47.0f;
+
+    float norm_force = 0.0f;
+    float norm_slip  = 0.0f;
+    bool  dxl_active = false;
+    float POS_CLOSE  = 0.0f;
+    float POS_OPEN   = 0.0f;
+
+    Serial.println("HU mode: '<force> <slip>' to set (0-1), 'd' toggle DXL, 'e' exit.");
+
+    while (true)
+    {
+        if (Serial.available())
+        {
+            String line = Serial.readStringUntil('\n');
+            line.trim();
+
+            if (line.equalsIgnoreCase("e"))
+            {
+                motor->relax(nullptr);
+                if (gripper) gripper->stop(nullptr);
+                Serial.println("HU mode OFF.");
+                return;
+            }
+            else if (line.equalsIgnoreCase("d") && gripper)
+            {
+                dxl_active = !dxl_active;
+                if (dxl_active)
+                {
+                    Response_Packet cal_resp;
+                    while (!motor->relax(&cal_resp))
+                        delay(200);
+                    memcpy(&POS_CLOSE, &cal_resp.encoder_value, sizeof(POS_CLOSE));
+                    POS_OPEN = POS_CLOSE - TRIGGER_RANGE;
+                    Serial.printf("DXL ON: close=%.2f open=%.2f\n", POS_CLOSE, POS_OPEN);
+                }
+                else
+                {
+                    gripper->stop(nullptr);
+                    Serial.println("DXL OFF.");
+                }
+            }
+            else
+            {
+                int sp = line.indexOf(' ');
+                if (sp >= 0)
+                {
+                    norm_force = line.toFloat();
+                    norm_slip  = line.substring(sp + 1).toFloat();
+                    if (norm_force < 0.0f) norm_force = 0.0f;
+                    if (norm_force > 1.0f) norm_force = 1.0f;
+                    if (norm_slip  < 0.0f) norm_slip  = 0.0f;
+                    if (norm_slip  > 1.0f) norm_slip  = 1.0f;
+                    Serial.printf("set: force=%.2f slip=%.2f\n", norm_force, norm_slip);
+                }
+            }
+        }
+
+        if (dxl_active)
+        {
+            Response_Packet resp;
+            bool ok = motor->update_force_slip(norm_force, norm_slip, &resp);
+            if (!ok)
+            {
+                Serial.println("[HU] no ACK from haptic motor");
+                delay(200);
+                continue;
+            }
+            float pos_deg;
+            memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
+
+            float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+
+            float left_deg  = 90.0f * (1.0f - t);
+            float right_deg = 90.0f + 90.0f * t;
+            gripper->move_servo_fast(left_deg, right_deg);
+
+            Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
+                          norm_force, norm_slip, pos_deg, t, left_deg, right_deg);
+        }
+        else
+        {
+            motor->update_force_slip(norm_force, norm_slip);
+            Serial.printf("[HU] f=%.2f s=%.2f\n", norm_force, norm_slip);
+        }
+
+        delay(15);
+    }
+}
+
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 {
     bool pong = motor->ping_controller(500);
@@ -124,6 +218,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <l> <r> [spd]   gstop   gping");
+    Serial.println("Modes:   tm (trigger map)   hu (haptic update)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -163,7 +258,10 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (line.equalsIgnoreCase("tm")) {
             trigger_mapping(motor, gripper);
-            // trigger_mapping leaves the motor relaxed; sync CLI state.
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("hu")) {
+            haptic_update_mode(motor, gripper);
             relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.length() > 0) {

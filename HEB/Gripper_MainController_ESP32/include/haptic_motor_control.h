@@ -88,7 +88,8 @@ public:
     /*
     Updates haptic behavior based on finger readings
     */
-    bool update_force_slip(float normalized_force, float normalized_slip)
+    bool update_force_slip(float normalized_force, float normalized_slip,
+                           Response_Packet* resp_out = nullptr)
     {
         // Force: [0,1] → [MIN_FORCE_OUT, MAX_FORCE_OUT], sent as resistance (negative)
         float force_out = MIN_FORCE_OUT + normalized_force * (MAX_FORCE_OUT - MIN_FORCE_OUT);
@@ -109,7 +110,7 @@ public:
             ok &= vibrate(freq_out, amplitude, NULL);
         }
         current_force = force_out;
-        ok &= set_constant_force(-force_out, NULL);
+        ok &= set_constant_force(-force_out, resp_out);
         return ok;
     }
 
