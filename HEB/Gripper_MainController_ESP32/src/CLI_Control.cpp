@@ -45,14 +45,15 @@ void force_ramp_up(HapticMotorController* motor) {
 
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
 {
-    const float TRIGGER_RANGE = 40.0f;  // open - close is always 47 degrees
+    const float TRIGGER_RANGE = 47.0f;  // open - close is always 47 degrees
 
-    // Read the current position as the closed baseline (trigger starts closed).
-    // Retry until the STM32 responds — it may still be booting.
+    // Calibrate with the trigger fully closed. Use relax so the -1.5f force
+    // doesn't drive the trigger to the open position before we read.
+    // Encoder decreases (goes more negative) as the trigger opens.
     float POS_CLOSE = 0.0f;
     {
         Response_Packet init_resp;
-        while (!motor->set_constant_force(-1.5f, &init_resp))
+        while (!motor->relax(&init_resp))
             delay(200);
         memcpy(&POS_CLOSE, &init_resp.encoder_value, sizeof(POS_CLOSE));
     }

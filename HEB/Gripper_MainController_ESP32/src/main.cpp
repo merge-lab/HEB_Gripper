@@ -21,7 +21,57 @@ void setup() {
   CLI_Setup(&motor, &gripper);
 }
 
+/*
+Try various rates of vibration, see what people think sliprate is.
+Hypothesis: higher slip rate = lower frequency. 
+  Therefore low sliprate = high frequency and eventually blends into 0 freq 
+Experiment: will do 3 frequencies + no frequency. Users can rate very fast slip
+  , low slip, very low slip, no slip. Will have no force in between readings.
+  will run each for 3 seconds with a 10 second break
+*/
+void slip_mapping_test()
+{
+  unsigned long end;
+
+  // Segment 1: constant force only, 3 s
+  motor.vibrate(0, 0.0f, NULL);
+  end = millis() + 3000;
+  while (millis() < end) { motor.set_constant_force(-1.5f, NULL); delay(200); }
+
+  // Break: relax 10 s
+  end = millis() + 10000;
+  while (millis() < end) { motor.relax(NULL); delay(200); }
+
+  // Segment 2: high frequency (80 Hz) + constant force, 3 s
+  motor.vibrate(80, 0.5f, NULL);
+  end = millis() + 5000;
+  while (millis() < end) { motor.set_constant_force(-1.5f, NULL); delay(200); }
+
+  // Break
+  end = millis() + 2000;
+  while (millis() < end) { motor.relax(NULL); delay(200); }
+
+  // Segment 3: mid frequency (50 Hz) + constant force, 3 s
+  motor.vibrate(50, 0.5f, NULL);
+  end = millis() + 5000;
+  while (millis() < end) { motor.set_constant_force(-1.5f, NULL); delay(200); }
+
+  // Break
+  end = millis() + 2000;
+  while (millis() < end) { motor.relax(NULL); delay(200); }
+
+  // Segment 4: low frequency (25 Hz) + constant force, 3 s
+  motor.vibrate(25, 0.5f, NULL);
+  end = millis() + 5000;
+  while (millis() < end) { motor.set_constant_force(-1.5f, NULL); delay(200); }
+
+  motor.relax(NULL);
+
+  delay(5000);
+}
+
 void loop()
 {
   CLI(&motor, &gripper);
+  // slip_mapping_test();
 }
