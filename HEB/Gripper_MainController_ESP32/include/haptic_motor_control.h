@@ -86,32 +86,44 @@ public:
     bool vibrate(int frequency, float amplitude, Response_Packet* recieved);
 
     /*
-    Updates haptic behavior based on finger readings
+    Updates haptic behavior based on normalized finger readings [0,1].
+    When calibrate_trigger() has been called, automatically ceases actuation
+    at the open/close limits and resumes when the trigger moves back in range.
+    resp_out: if non-null, filled with the STM32 response from the force command.
     */
     bool update_force_slip(float normalized_force, float normalized_slip,
-                           Response_Packet* resp_out = nullptr)
-    {
-        // Force: [0,1] → [MIN_FORCE_OUT, MAX_FORCE_OUT], sent as resistance (negative)
-        float force_out = MIN_FORCE_OUT + normalized_force * (MAX_FORCE_OUT - MIN_FORCE_OUT);
+                           Response_Packet* resp_out = nullptr);
 
-        // Slip: dead zone then inverse-linear from MAX_FREQ down to MIN_FREQ
-        float dead_zone_norm = SLIP_DEAD_ZONE / (MAX_SLIP - MIN_SLIP);
-        int freq_out;
-        if (normalized_slip <= dead_zone_norm) {
-            freq_out = 0;
-        } else {
-            float t = (normalized_slip - dead_zone_norm) / (1.0f - dead_zone_norm);
-            freq_out = (int)(MAX_FREQ - t * (MAX_FREQ - MIN_FREQ));
-        }
+    /*
+    Auto-calibrates the trigger open and close limits by driving the motor
+    to each mechanical stop and detecting when the encoder stabilizes.
+    cal_force: torque magnitude used during calibration (default 0.5).
+    Returns true on success; false if either limit is not reached within 5 s.
+    After a successful call, update_force_slip will enforce the limits.
+    */
+    bool calibrate_trigger(float cal_force = 0.5f);
 
-        bool ok = true;
-        if (freq_out != current_frequency) {
-            current_frequency = freq_out;
-            ok &= vibrate(freq_out, amplitude, NULL);
-        }
-        current_force = force_out;
-        ok &= set_constant_force(-force_out, resp_out);
-        return ok;
+    bool  is_calibrated()   const { return calibrated; }
+    float get_limit_open()  const { return LIMIT_OPEN; }
+    float get_limit_close() const { return LIMIT_CLOSE; }
+    // Dead zone / ramp / power-off only applies at LIMIT_OPEN (the limit the
+    // trigger is driven towards). LIMIT_CLOSE is the natural resting position
+    // and needs no protection.
+    bool  at_limit(float encoder_pos) const {
+        if (!calibrated) return false;
+        return encoder_pos >= LIMIT_OPEN - LIMIT_THRESHOLD;
+    }
+    bool  still_at_limit(float encoder_pos) const {
+        if (!calibrated) return false;
+        return encoder_pos >= LIMIT_OPEN - (LIMIT_THRESHOLD + LIMIT_HYSTERESIS);
+    }
+    float limit_approach_scale(float encoder_pos) const {
+        if (!calibrated) return 1.0f;
+        float dist = (LIMIT_OPEN - LIMIT_THRESHOLD) - encoder_pos;
+        if (dist <= 0.0f)            return 0.0f;
+        if (dist >= LIMIT_RAMP_ZONE) return 1.0f;
+        float t = dist / LIMIT_RAMP_ZONE;
+        return (expf(LIMIT_RAMP_EXP * t) - 1.0f) / (expf(LIMIT_RAMP_EXP) - 1.0f);
     }
 
 private:
@@ -135,7 +147,15 @@ private:
     float MAX_SLIP = 50;
     float SLIP_DEAD_ZONE = 10;
 
-
+    // trigger calibration
+    float LIMIT_OPEN      = 0.0f;
+    float LIMIT_CLOSE     = 0.0f;
+    float LIMIT_THRESHOLD  =  0.01f;  // dead-zone entry size (degrees) at each limit
+    float LIMIT_HYSTERESIS =  3.0f;  // extra clearance required to exit the limit state
+    float LIMIT_RAMP_ZONE  =  15.0f;  // degrees over which force tapers to 0 before the threshold
+    float LIMIT_RAMP_EXP   =   3.0f;  // exponential curve steepness (higher = more convex), max = 88.7
+    bool  calibrated      = false;
+    float last_encoder    = 0.0f;  // encoder value from the most recent update_force_slip call
 
     /*
     Casts and sends the given packet with Serial.write()
@@ -166,6 +186,10 @@ private:
     Returns: response packet that was read
     */
     Response_Packet read_response(bool* valid, unsigned long timeout);
+
+    // Drives the motor at `force` until the encoder stabilizes; returns the
+    // stable encoder value, or 999999.0f if the timeout (5 s) is reached.
+    float find_calibration_limit(float force);
 
     /*
     normalizes input force to be between 0 and 1

@@ -45,22 +45,30 @@ void force_ramp_up(HapticMotorController* motor) {
 
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
 {
-    const float TRIGGER_RANGE = 47.0f;  // open - close is always 47 degrees
+    float POS_CLOSE, POS_OPEN;
 
-    // Calibrate with the trigger fully closed. Use relax so the -1.5f force
-    // doesn't drive the trigger to the open position before we read.
-    // Encoder decreases (goes more negative) as the trigger opens.
-    float POS_CLOSE = 0.0f;
+    if (motor->is_calibrated())
     {
+        // Use measured mechanical limits; exact range replaces the hardcoded 47°.
+        POS_CLOSE = motor->get_limit_close();
+        float range = motor->get_limit_open() - motor->get_limit_close();
+        POS_OPEN  = POS_CLOSE - range;
+        Serial.printf("Trigger mapping ON (calibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
+                      POS_CLOSE, POS_OPEN);
+    }
+    else
+    {
+        // Fallback: read current encoder position with trigger fully closed.
         Response_Packet init_resp;
         while (!motor->relax(&init_resp))
             delay(200);
         memcpy(&POS_CLOSE, &init_resp.encoder_value, sizeof(POS_CLOSE));
+        POS_OPEN = POS_CLOSE - 47.0f;
+        Serial.printf("Trigger mapping ON (uncalibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
+                      POS_CLOSE, POS_OPEN);
     }
-    float POS_OPEN = POS_CLOSE - TRIGGER_RANGE;
 
-    Serial.printf("Trigger mapping ON: close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
-                  POS_CLOSE, POS_OPEN);
+    bool at_lim = false;
 
     while (true)
     {
@@ -78,9 +86,10 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
             }
         }
 
-        // Drive haptic at constant force 1.5 and read back the encoder position.
+        // When at limit, send 0 force (power saving); otherwise apply resistance.
         Response_Packet resp;
-        bool ok = motor->set_constant_force(-1.5f, &resp);
+        float force_cmd = at_lim ? 0.0f : -1.5f;
+        bool ok = motor->set_constant_force(force_cmd, &resp);
 
         if (!ok)
         {
@@ -92,20 +101,25 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         float pos_deg;
         memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
 
-        // Map trigger position to a 0-1 value: 0 = fully closed, 1 = fully open.
+        at_lim = at_lim ? motor->still_at_limit(pos_deg) : motor->at_limit(pos_deg);
+
+        if (at_lim)
+            Serial.printf("[TM] pos=%+.2f AT LIMIT\n", pos_deg);
+
+        // Always compute t and drive servos — limit threshold is haptic-only.
         float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
 
-        // Interpolate servo angles.
         float left_deg  = 90.0f * (1.0f - t);  // 90 (closed) -> 0 (open)
         float right_deg = 90.0f + 90.0f * t;   // 90 (closed) -> 180 (open)
 
         if (gripper)
             gripper->move_servo_fast(left_deg, right_deg);
 
-        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
-                      pos_deg, t, left_deg, right_deg);
+        if (!at_lim)
+            Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
+                          pos_deg, t, left_deg, right_deg);
 
         delay(15);  // pace to ~50 Hz; gives Arduino clean time to receive each packet
     }
@@ -218,7 +232,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <l> <r> [spd]   gstop   gping");
-    Serial.println("Modes:   tm (trigger map)   hu (haptic update)");
+    Serial.println("Modes:   tm (trigger map)   hu (haptic update)   cal (calibrate trigger)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -262,6 +276,15 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (line.equalsIgnoreCase("hu")) {
             haptic_update_mode(motor, gripper);
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("cal")) {
+            Serial.println("Calibrating trigger limits — do not touch the trigger...");
+            bool ok = motor->calibrate_trigger();
+            if (ok)
+                Serial.println("Calibration done.");
+            else
+                Serial.println("Calibration FAILED (timeout — check haptic link).");
             relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.length() > 0) {

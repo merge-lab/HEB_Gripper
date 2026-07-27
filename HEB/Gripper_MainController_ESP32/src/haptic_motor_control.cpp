@@ -186,3 +186,121 @@ bool HapticMotorController::set_spring_force(float spring_constant, Response_Pac
 
     return send_command(packet, recieved);
 }
+
+float HapticMotorController::find_calibration_limit(float force)
+{
+    const float        TOLERANCE  = 0.5f;
+    const int          STABLE_REQ = 5;
+    const unsigned long SAMPLE_MS  = 50;
+    const unsigned long TIMEOUT_MS = 5000;
+
+    float prev    = 0.0f;
+    bool  has_prev = false;
+    int   stable  = 0;
+    unsigned long t0 = millis();
+
+    while (millis() - t0 < TIMEOUT_MS)
+    {
+        Response_Packet r;
+        if (set_constant_force(force, &r))
+        {
+            float enc;
+            memcpy(&enc, &r.encoder_value, sizeof(enc));
+
+            if (has_prev && fabsf(enc - prev) < TOLERANCE)
+            {
+                if (++stable >= STABLE_REQ)
+                    return enc;
+            }
+            else
+            {
+                stable = 0;
+            }
+            prev     = enc;
+            has_prev = true;
+        }
+        delay(SAMPLE_MS);
+    }
+    return 999999.0f;  // timeout sentinel
+}
+
+bool HapticMotorController::calibrate_trigger(float cal_force)
+{
+    float lim1 = find_calibration_limit(cal_force);
+    if (lim1 == 999999.0f) { relax(nullptr); return false; }
+
+    relax(nullptr);
+    delay(300);
+
+    float lim2 = find_calibration_limit(-cal_force);
+    if (lim2 == 999999.0f) { relax(nullptr); return false; }
+
+    relax(nullptr);
+
+    LIMIT_OPEN   = (lim1 > lim2) ? lim1 : lim2;
+    LIMIT_CLOSE  = (lim1 > lim2) ? lim2 : lim1;
+    last_encoder = LIMIT_OPEN;
+    calibrated   = true;
+    return true;
+}
+
+bool HapticMotorController::update_force_slip(float normalized_force, float normalized_slip,
+                                              Response_Packet* resp_out)
+{
+    // Force: [0,1] → [MIN_FORCE_OUT, MAX_FORCE_OUT], sent as resistance (negative)
+    float force_out = MIN_FORCE_OUT + normalized_force * (MAX_FORCE_OUT - MIN_FORCE_OUT);
+
+    // Slip: dead zone then inverse-linear from MAX_FREQ down to MIN_FREQ
+    float dead_zone_norm = SLIP_DEAD_ZONE / (MAX_SLIP - MIN_SLIP);
+    int freq_out;
+    if (normalized_slip <= dead_zone_norm) {
+        freq_out = 0;
+    } else {
+        float t = (normalized_slip - dead_zone_norm) / (1.0f - dead_zone_norm);
+        freq_out = (int)(MAX_FREQ - t * (MAX_FREQ - MIN_FREQ));
+    }
+
+    bool ok = true;
+
+    if (calibrated)
+    {
+        // Use a local packet buffer if the caller doesn't need the response,
+        // so we can always update last_encoder.
+        Response_Packet local_resp;
+        Response_Packet* rp = resp_out ? resp_out : &local_resp;
+
+        bool at_limit = (last_encoder >= LIMIT_OPEN  - LIMIT_THRESHOLD) ||
+                        (last_encoder <= LIMIT_CLOSE + LIMIT_THRESHOLD);
+
+        if (at_limit)
+        {
+            // Cease actuation; still read encoder to track when trigger moves away.
+            ok = set_constant_force(0.0f, rp);
+        }
+        else
+        {
+            if (freq_out != current_frequency)
+            {
+                current_frequency = freq_out;
+                ok &= vibrate(freq_out, amplitude, NULL);
+            }
+            current_force = force_out;
+            ok &= set_constant_force(-force_out, rp);
+        }
+
+        if (ok)
+            memcpy(&last_encoder, &rp->encoder_value, sizeof(last_encoder));
+
+        return ok;
+    }
+
+    // Not calibrated — original behavior, no encoder read overhead.
+    if (freq_out != current_frequency)
+    {
+        current_frequency = freq_out;
+        ok &= vibrate(freq_out, amplitude, NULL);
+    }
+    current_force = force_out;
+    ok &= set_constant_force(-force_out, resp_out);
+    return ok;
+}
