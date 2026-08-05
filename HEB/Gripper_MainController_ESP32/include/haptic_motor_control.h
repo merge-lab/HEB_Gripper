@@ -103,6 +103,10 @@ public:
     */
     bool calibrate_trigger(float cal_force = 0.5f);
 
+    // Pushes current limit params to the STM32 via SET_LIMITS.
+    // Called automatically by calibrate_trigger() on success.
+    bool send_limits();
+
     bool  is_calibrated()   const { return calibrated; }
     float get_limit_open()  const { return LIMIT_OPEN; }
     float get_limit_close() const { return LIMIT_CLOSE; }

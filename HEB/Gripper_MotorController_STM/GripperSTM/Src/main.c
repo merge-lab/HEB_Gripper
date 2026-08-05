@@ -122,6 +122,15 @@ volatile bool debug_ready = false;
 volatile float debug_torque = 0;
 volatile float debug_motor_torque = 0;  // measured Iq (A): actual motor torque -> trigger
 volatile float debug_user_torque  = 0;  // estimated user torque on trigger (A-equivalent)
+
+// Limit gate + ramp params (set via SET_LIMITS). Active when limits_enabled = true.
+static float limit_open       = 0.0f;
+static float limit_threshold  = 0.0f;
+static float limit_hysteresis = 0.0f;
+static float limit_ramp_zone  = 0.0f;
+static float limit_ramp_exp   = 3.0f;
+static bool  limits_enabled   = false;
+static bool  at_limit_st      = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -331,6 +340,29 @@ void handle_command(void) {
 		send_response(ACK);
 		break;
 
+	case SET_LIMITS: {
+		float lo, thr, hyst, ramp, exp_k;
+		memcpy(&lo,    (const void*)&cmd.param_1, 4);
+		memcpy(&thr,   (const void*)&cmd.param_2, 4);
+		memcpy(&hyst,  (const void*)&cmd.param_3, 4);
+		memcpy(&ramp,  (const void*)&cmd.param_4, 4);
+		memcpy(&exp_k, (const void*)&cmd.param_5, 4);
+		if (!isfinite(lo) || !isfinite(thr) || !isfinite(hyst) ||
+		    !isfinite(ramp) || !isfinite(exp_k) || ramp <= 0.0f) {
+			send_response(WRONG_PARAMS);
+			break;
+		}
+		limit_open       = lo;
+		limit_threshold  = thr;
+		limit_hysteresis = hyst;
+		limit_ramp_zone  = ramp;
+		limit_ramp_exp   = exp_k;
+		limits_enabled   = true;
+		at_limit_st      = false;
+		send_response(ACK);
+		break;
+	}
+
 	default:
 		send_response(NOT_RECOGNIZED);
 		break;
@@ -433,8 +465,27 @@ void loop_1ms()
     }
     else if (control_type == CONSTANT)
     {
-        // Open-loop constant torque, independent of position.
-        torque_command = constant_force_setpoint;
+        float force = constant_force_setpoint;
+        if (limits_enabled) {
+            if (at_limit_st) {
+                at_limit_st = (pos_deg >= limit_open - (limit_threshold + limit_hysteresis));
+            } else {
+                at_limit_st = (pos_deg >= limit_open - limit_threshold);
+            }
+            if (at_limit_st) {
+                force = 0.0f;
+            } else {
+                float dist = (limit_open - limit_threshold) - pos_deg;
+                if (dist < limit_ramp_zone) {
+                    float t   = dist / limit_ramp_zone;
+                    float k   = fminf(limit_ramp_exp, 88.0f);
+                    float et  = expf(fminf(k * t, 88.0f));
+                    float ek  = expf(k);
+                    force    *= (et - 1.0f) / (ek - 1.0f);
+                }
+            }
+        }
+        torque_command = force;
     }
     else // SPRING
     {

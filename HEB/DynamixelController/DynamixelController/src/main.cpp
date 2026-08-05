@@ -2,6 +2,7 @@
 #include <SoftwareSerial.h>
 #include <DynamixelShield.h>
 #include "dynamixel_protocol.h"
+#include "Slave_Side.h"
 
 // ---- Dynamixel config -------------------------------------------------------
 DynamixelShield dxl;

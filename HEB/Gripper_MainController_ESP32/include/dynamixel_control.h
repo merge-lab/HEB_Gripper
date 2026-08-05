@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include "dynamixel_protocol.h"
+#include "Master_Side.h"
 
 // ESP32-side driver for the Arduino Uno / DynamixelShield gripper board.
 //

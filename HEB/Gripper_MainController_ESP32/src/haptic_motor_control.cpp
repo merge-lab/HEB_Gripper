@@ -241,7 +241,20 @@ bool HapticMotorController::calibrate_trigger(float cal_force)
     LIMIT_CLOSE  = (lim1 > lim2) ? lim2 : lim1;
     last_encoder = LIMIT_OPEN;
     calibrated   = true;
+    send_limits();
     return true;
+}
+
+bool HapticMotorController::send_limits()
+{
+    uint32_t p1, p2, p3, p4, p5;
+    memcpy(&p1, &LIMIT_OPEN,       4);
+    memcpy(&p2, &LIMIT_THRESHOLD,  4);
+    memcpy(&p3, &LIMIT_HYSTERESIS, 4);
+    memcpy(&p4, &LIMIT_RAMP_ZONE,  4);
+    memcpy(&p5, &LIMIT_RAMP_EXP,   4);
+    Command_Packet pkt = { START_BYTE, SET_LIMITS, p1, p2, p3, p4, p5, 0, END_BYTE };
+    return send_command(pkt, nullptr);
 }
 
 bool HapticMotorController::update_force_slip(float normalized_force, float normalized_slip,

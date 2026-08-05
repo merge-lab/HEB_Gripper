@@ -25,7 +25,8 @@ typedef enum
     CONSTANT_FORCE = 1,   // ask motor to output constant force
     SPRING_FORCE   = 2,   // ask motor to act like a spring
     VIBRATE        = 3,   // add vibration on top of the current force
-    RELAX          = 4    // end all intentional force
+    RELAX          = 4,   // end all intentional force
+    SET_LIMITS     = 5    // configure open-limit gate + ramp on STM32 (params 1-5: floats)
 } Command;
 
 // Command packet standard

@@ -2,6 +2,7 @@
 #include "haptic_motor_control.h"
 #include "dynamixel_control.h"
 #include "CLI_Control.h"
+#include "Master_Side.h"
 
 // UART2 link to the STM32 haptic motor controller.
 // Wiring: ESP32 TX=17 -> STM RX, ESP32 RX=16 <- STM TX, common GND. 115200 8N1.

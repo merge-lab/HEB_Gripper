@@ -68,8 +68,6 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
                       POS_CLOSE, POS_OPEN);
     }
 
-    bool at_lim = false;
-
     while (true)
     {
         // Exit check — non-blocking
@@ -86,10 +84,9 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
             }
         }
 
-        // When at limit, send 0 force (power saving); otherwise apply resistance.
+        // STM32 handles limit gating and ramp at 1 kHz — just send full force.
         Response_Packet resp;
-        float force_cmd = at_lim ? 0.0f : -1.5f;
-        bool ok = motor->set_constant_force(force_cmd, &resp);
+        bool ok = motor->set_constant_force(-1.5f, &resp);
 
         if (!ok)
         {
@@ -101,27 +98,20 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         float pos_deg;
         memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
 
-        at_lim = at_lim ? motor->still_at_limit(pos_deg) : motor->at_limit(pos_deg);
-
-        if (at_lim)
-            Serial.printf("[TM] pos=%+.2f AT LIMIT\n", pos_deg);
-
-        // Always compute t and drive servos — limit threshold is haptic-only.
         float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
 
-        float left_deg  = 90.0f * (1.0f - t);  // 90 (closed) -> 0 (open)
-        float right_deg = 90.0f + 90.0f * t;   // 90 (closed) -> 180 (open)
+        float left_deg  = 90.0f * (1.0f - t);
+        float right_deg = 90.0f + 90.0f * t;
 
         if (gripper)
             gripper->move_servo_fast(left_deg, right_deg);
 
-        if (!at_lim)
-            Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
-                          pos_deg, t, left_deg, right_deg);
+        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
+                      pos_deg, t, left_deg, right_deg);
 
-        delay(15);  // pace to ~50 Hz; gives Arduino clean time to receive each packet
+        delay(15);
     }
 }
 
@@ -232,7 +222,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <l> <r> [spd]   gstop   gping");
-    Serial.println("Modes:   tm (trigger map)   hu (haptic update)   cal (calibrate trigger)");
+    Serial.println("Modes:   tm (trigger map)   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -285,6 +275,19 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                 Serial.println("Calibration done.");
             else
                 Serial.println("Calibration FAILED (timeout — check haptic link).");
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("sl")) {
+            if (motor->is_calibrated()) {
+                bool ok = motor->send_limits();
+                if (ok)
+                    Serial.printf("Limits sent to STM32 (open=%.2f).\n",
+                                  motor->get_limit_open());
+                else
+                    Serial.println("send_limits FAILED.");
+            } else {
+                Serial.println("Not calibrated — run 'cal' first.");
+            }
             relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.length() > 0) {
