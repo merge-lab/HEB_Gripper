@@ -78,7 +78,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
             if (line.equalsIgnoreCase("e"))
             {
                 motor->relax(nullptr);
-                if (gripper) gripper->stop(nullptr);
+                if (gripper) gripper->stop();
                 Serial.println("Trigger mapping OFF.");
                 return;
             }
@@ -106,7 +106,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         float right_deg = 90.0f + 90.0f * t;
 
         if (gripper)
-            gripper->move_servo_fast(left_deg, right_deg);
+            gripper->move(left_deg, right_deg);
 
         Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
                       pos_deg, t, left_deg, right_deg);
@@ -137,7 +137,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             if (line.equalsIgnoreCase("e"))
             {
                 motor->relax(nullptr);
-                if (gripper) gripper->stop(nullptr);
+                if (gripper) gripper->stop();
                 Serial.println("HU mode OFF.");
                 return;
             }
@@ -155,7 +155,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
                 }
                 else
                 {
-                    gripper->stop(nullptr);
+                    gripper->stop();
                     Serial.println("DXL OFF.");
                 }
             }
@@ -194,7 +194,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
 
             float left_deg  = 90.0f * (1.0f - t);
             float right_deg = 90.0f + 90.0f * t;
-            gripper->move_servo_fast(left_deg, right_deg);
+            gripper->move(left_deg, right_deg);
 
             Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
                           norm_force, norm_slip, pos_deg, t, left_deg, right_deg);
@@ -216,8 +216,8 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     Serial.println(pong ? "haptic link up (PONG)" : "haptic no PONG - check link");
 
     if (gripper) {
-        bool gpong = gripper->ping(300);
-        Serial.println(gpong ? "gripper link up (PONG)" : "gripper no PONG - check link");
+        bool gpong = gripper->ping();
+        Serial.println(gpong ? "gripper link up (prev-ack)" : "gripper no prev-ack yet - check link");
     }
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
@@ -324,22 +324,23 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                 float l_deg = arg.toFloat();
                 float r_deg = (sp1 >= 0) ? arg.substring(sp1 + 1).toFloat() : l_deg;
                 float spd   = (sp2 >= 0) ? arg.substring(sp2 + 1).toFloat() : 0.0f;
-                Dyn_Response_Packet resp;
-                bool ok = gripper->move_servo(l_deg, r_deg, spd, spd, &resp);
-                float lmA, rmA;
-                memcpy(&lmA, &resp.left_motor_current,  sizeof(lmA));
-                memcpy(&rmA, &resp.right_motor_current, sizeof(rmA));
-                Serial.printf("move L=%.1f R=%.1f spd=%.0f -> %s (L=%.0fmA R=%.0fmA)\n",
-                              l_deg, r_deg, spd,
-                              ok ? (resp.response == DYN_ACK ? "ACK" : "FAIL") : "no resp",
-                              lmA, rmA);
+                bool ok = gripper->move(l_deg, r_deg, spd, spd);
+                DynamixelController::Telemetry tel;
+                bool has_tel = gripper->get_latest_position(&tel);
+                Serial.printf("move L=%.1f R=%.1f spd=%.0f -> prev-ack %s%s\n",
+                              l_deg, r_deg, spd, ok ? "yes" : "no",
+                              has_tel ? " (new settle telemetry available)" : "");
+                if (has_tel) {
+                    Serial.printf("  settled: goal L=%.1f R=%.1f actual L=%.1f R=%.1f\n",
+                                  tel.goal_left_deg, tel.goal_right_deg,
+                                  tel.actual_left_deg, tel.actual_right_deg);
+                }
             } else if (line.equalsIgnoreCase("gstop") && gripper) {
-                Dyn_Response_Packet resp;
-                bool ok = gripper->stop(&resp);
-                Serial.println(ok ? "gripper STOP ACK" : "gripper STOP no resp");
+                bool ok = gripper->stop();
+                Serial.println(ok ? "gripper STOP (prev-ack)" : "gripper STOP (no prev-ack)");
             } else if (line.equalsIgnoreCase("gping") && gripper) {
-                bool ok = gripper->ping(300);
-                Serial.println(ok ? "gripper PONG" : "gripper no PONG");
+                bool ok = gripper->ping();
+                Serial.println(ok ? "gripper link ok (prev-ack)" : "gripper no prev-ack");
             } else {
                 Serial.println("unknown command");
             }

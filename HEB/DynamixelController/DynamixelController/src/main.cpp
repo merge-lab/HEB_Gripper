@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <SoftwareSerial.h>
 #include <DynamixelShield.h>
 #include "dynamixel_protocol.h"
 #include "Slave_Side.h"
@@ -20,12 +19,13 @@ const uint8_t   ID_RIGHT      = 1;
 #define GOAL_POS_ADDR  116
 #define GOAL_POS_LEN   4
 
-// ---- ESP32 serial link ------------------------------------------------------
-// Hardware Serial (pins 0/1) is owned by DynamixelShield.
-// Pin 2 is DXL_DIR_PIN — do not use for SoftwareSerial.
-// Wire: Arduino pin 10 <- ESP32 TX (GPIO21),  Arduino pin 12 -> ESP32 RX (GPIO35).
-SoftwareSerial espSerial(10, 12);
-const long     ESP_BAUD = 57600;
+// ---- ESP32 SPI link ----------------------------------------------------------
+// Hardware SPI is fixed by the AVR: SS=D10, MOSI=D11, MISO=D12, SCK=D13 --
+// repurposed from the old SoftwareSerial(10,12) UART link (D10/D12) plus two
+// previously-idle pins (D11/D13). Hardware Serial (pins 0/1) is owned by
+// DynamixelShield; pin 2 is DXL_DIR_PIN -- neither is touched here.
+#define DATA_READY_PIN 9
+Slave_Controller slave(DATA_READY_PIN);
 
 // ---- Heartbeat safety -------------------------------------------------------
 #define HEARTBEAT_TIMEOUT_MS 500UL
@@ -33,10 +33,14 @@ const long     ESP_BAUD = 57600;
 static unsigned long last_cmd_ms   = 0;
 static bool          servos_active = false;
 
-// ---- Packet receiver state machine ------------------------------------------
-static uint8_t rx_buf[sizeof(Dyn_Command_Packet)];
-static uint8_t rx_idx    = 0;
-static bool    rx_active = false;
+// ---- Goal / settle state -----------------------------------------------------
+static float         goal_left_deg     = 0.0f;
+static float         goal_right_deg    = 0.0f;
+static bool          settled_notified  = true; // true = nothing pending to notify
+
+static unsigned long last_position_poll_ms = 0;
+#define POSITION_POLL_INTERVAL_MS 20UL // throttles MOVING/position reads on the
+                                        // half-duplex Dynamixel UART bus
 
 // ---- LED --------------------------------------------------------------------
 const uint8_t LED_PIN = 13;
@@ -96,41 +100,18 @@ static void set_profile_velocity(uint8_t id, float speed_rpm)
     dxl.writeControlTableItem(ControlTableItem::PROFILE_VELOCITY, id, raw);
 }
 
-// ---- Response sender --------------------------------------------------------
-static void send_response(Dyn_Response resp_code)
-{
-    Dyn_Response_Packet pkt;
-    pkt.startByte = DYN_START_BYTE;
-    pkt.response  = (uint8_t)resp_code;
-
-    float left_mA  = dxl.getPresentCurrent(ID_LEFT,  UNIT_MILLI_AMPERE);
-    float right_mA = dxl.getPresentCurrent(ID_RIGHT, UNIT_MILLI_AMPERE);
-
-    memcpy(&pkt.left_motor_current,  &left_mA,  sizeof(pkt.left_motor_current));
-    memcpy(&pkt.right_motor_current, &right_mA, sizeof(pkt.right_motor_current));
-
-    pkt.endByte = DYN_END_BYTE;
-    espSerial.write((const uint8_t*)&pkt, sizeof(pkt));
-}
-
 // ---- Command handler --------------------------------------------------------
-static void handle_command(const Dyn_Command_Packet* cmd)
+static void handle_command(const local_packet& lp)
 {
-    last_cmd_ms = millis();
-
-    switch (cmd->command)
+    switch (lp.command)
     {
-        case DYN_PING:
-            send_response(DYN_PONG);
-            break;
-
-        case DYN_MOVE_SERVO:
+        case CMD_DXL_MOVE:
         {
             float left_deg, right_deg, left_spd, right_spd;
-            memcpy(&left_deg,  &cmd->left_degrees,  sizeof(left_deg));
-            memcpy(&right_deg, &cmd->right_degrees, sizeof(right_deg));
-            memcpy(&left_spd,  &cmd->left_speed,    sizeof(left_spd));
-            memcpy(&right_spd, &cmd->right_speed,   sizeof(right_spd));
+            memcpy(&left_deg,  &lp.data1, sizeof(left_deg));
+            memcpy(&right_deg, &lp.data2, sizeof(right_deg));
+            memcpy(&left_spd,  &lp.data3, sizeof(left_spd));
+            memcpy(&right_spd, &lp.data4, sizeof(right_spd));
 
             if (!servos_active) {
                 dxl.torqueOn(ID_LEFT);
@@ -142,69 +123,26 @@ static void handle_command(const Dyn_Command_Packet* cmd)
             set_profile_velocity(ID_LEFT,  left_spd);
             set_profile_velocity(ID_RIGHT, right_spd);
 
-            bool ok = sync_move(left_deg, right_deg);
-            send_response(ok ? DYN_ACK : DYN_FAILURE);
+            goal_left_deg  = left_deg;
+            goal_right_deg = right_deg;
+            sync_move(left_deg, right_deg); // non-blocking; retargets in-flight motion
+            settled_notified = false;        // re-arm: must notify once THIS goal settles
             break;
         }
 
-        case DYN_MOVE_SERVO_FAST:
-        {
-            // High-rate control path: move servos, send no response.
-            // Skipping send_response avoids SoftwareSerial TX disabling
-            // interrupts, which would corrupt the incoming RX stream.
-            float left_deg, right_deg;
-            memcpy(&left_deg,  &cmd->left_degrees,  sizeof(left_deg));
-            memcpy(&right_deg, &cmd->right_degrees, sizeof(right_deg));
-
-            if (!servos_active) {
-                dxl.torqueOn(ID_LEFT);
-                dxl.torqueOn(ID_RIGHT);
-                servos_active = true;
-            }
-
-            sync_move(left_deg, right_deg);
-            break;
-        }
-
-        case DYN_STOP:
+        case CMD_DXL_STOP:
             dxl.torqueOff(ID_LEFT);
             dxl.torqueOff(ID_RIGHT);
-            servos_active = false;
-            send_response(DYN_ACK);
+            servos_active    = false;
+            settled_notified = true; // suppress a stale notify for an abandoned goal
+            break;
+
+        case CMD_DXL_PING:
+            // No action needed - the fast ACK already confirms the link.
             break;
 
         default:
-            send_response(DYN_MALFORMED);
             break;
-    }
-}
-
-// ---- Packet accumulator -----------------------------------------------------
-static void poll_esp_serial()
-{
-    while (espSerial.available())
-    {
-        uint8_t b = espSerial.read();
-
-        if (!rx_active) {
-            if (b == (uint8_t)DYN_START_BYTE) {
-                rx_buf[0] = b;
-                rx_idx    = 1;
-                rx_active = true;
-            }
-        } else {
-            rx_buf[rx_idx++] = b;
-
-            if (rx_idx == sizeof(Dyn_Command_Packet)) {
-                rx_active = false;
-                rx_idx    = 0;
-
-                if (rx_buf[sizeof(Dyn_Command_Packet) - 1] == (uint8_t)DYN_END_BYTE)
-                    handle_command((const Dyn_Command_Packet*)rx_buf);
-                else
-                    send_response(DYN_MALFORMED);
-            }
-        }
     }
 }
 
@@ -237,18 +175,55 @@ void setup()
 
     init_sync_write();
     last_cmd_ms = millis();
-    espSerial.begin(ESP_BAUD);
     blink_led(3, 400, 200);
+
+    // Must be last: claims D13 for hardware SPI SCK. D13 is also the onboard
+    // LED, so no blink_led()/digitalWrite(LED_PIN,...) may run after this --
+    // driving it as a GPIO once SPI slave mode is enabled would contend with
+    // the SPI master's SCK drive.
+    slave.begin();
 }
 
 // ---- Main loop --------------------------------------------------------------
 void loop()
 {
-    poll_esp_serial();
+    local_packet lp;
+    if (slave.get_command(&lp) && lp.command != 0)
+    {
+        last_cmd_ms = millis(); // refreshed on every successfully-received command
+        handle_command(lp);
+    }
 
+    // Heartbeat safety timeout - unchanged behavior from the old UART link.
     if (servos_active && (millis() - last_cmd_ms > HEARTBEAT_TIMEOUT_MS)) {
         dxl.torqueOff(ID_LEFT);
         dxl.torqueOff(ID_RIGHT);
         servos_active = false;
+    }
+
+    // Settle detection + one-shot telemetry notify.
+    if (servos_active && !settled_notified &&
+        (millis() - last_position_poll_ms >= POSITION_POLL_INTERVAL_MS))
+    {
+        last_position_poll_ms = millis();
+
+        bool left_moving  = dxl.readControlTableItem(ControlTableItem::MOVING, ID_LEFT)  != 0;
+        bool right_moving = dxl.readControlTableItem(ControlTableItem::MOVING, ID_RIGHT) != 0;
+
+        if (!left_moving && !right_moving)
+        {
+            float actual_left  = dxl.getPresentPosition(ID_LEFT,  UNIT_DEGREE);
+            float actual_right = dxl.getPresentPosition(ID_RIGHT, UNIT_DEGREE);
+
+            local_packet settle_lp;
+            settle_lp.command = CMD_DXL_SETTLED;
+            memcpy(&settle_lp.data1, &goal_left_deg,   sizeof(float));
+            memcpy(&settle_lp.data2, &goal_right_deg,  sizeof(float));
+            memcpy(&settle_lp.data3, &actual_left,     sizeof(float));
+            memcpy(&settle_lp.data4, &actual_right,    sizeof(float));
+
+            slave.notify_data(&settle_lp);
+            settled_notified = true;
+        }
     }
 }

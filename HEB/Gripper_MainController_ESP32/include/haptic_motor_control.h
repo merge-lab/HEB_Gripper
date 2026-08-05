@@ -6,7 +6,7 @@
 
 // Wire protocol (command/response packets, framing bytes, enums) is shared
 // with the STM32 motor controller.
-#include "gripper_protocol.h"
+#include "haptic_uart_protocol.h"
 
 
 class HapticMotorController
