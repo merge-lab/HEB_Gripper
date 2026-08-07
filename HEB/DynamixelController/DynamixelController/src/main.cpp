@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
 #include <DynamixelShield.h>
+#include <Servo_Control.h>
 #include "dynamixel_protocol.h"
 #include "Slave_Side.h"
 
@@ -8,8 +9,15 @@
 DynamixelShield dxl;
 const float     DXL_PROTOCOL  = 2.0;
 const long      DXL_BAUD      = 1000000;
+
+// Indices 0/1 below double as both the raw Dynamixel hardware IDs (this
+// project's servos happen to be IDs 0/1) and the array positions used for
+// every Servo_Controller call (positions/speeds/currents). If the hardware
+// IDs ever change, SERVO_IDS still must stay index-ordered left, then right.
 const uint8_t   ID_LEFT       = 0;
 const uint8_t   ID_RIGHT      = 1;
+const int       SERVO_IDS[]   = { ID_LEFT, ID_RIGHT };
+const size_t    NUM_SERVOS    = 2;
 
 // Default profile velocity for smooth tracking. Explicit speed in a move
 // command overrides this. 0 = max speed (no limit).
@@ -19,6 +27,8 @@ const uint8_t   ID_RIGHT      = 1;
 // 4096 counts per revolution; raw = degrees * 4096 / 360.
 #define GOAL_POS_ADDR  116
 #define GOAL_POS_LEN   4
+
+static Servo_Controller* servo_controller = nullptr;
 
 // ---- ESP32 serial link ------------------------------------------------------
 // Hardware Serial (pins 0/1) is owned by DynamixelShield.
@@ -49,31 +59,6 @@ static void blink_led(int times, int on_ms, int off_ms)
     }
 }
 
-// ---- Sync Write setup -------------------------------------------------------
-// Sends goal positions to both servos in a single packet so they start
-// moving at exactly the same time.
-
-typedef struct { int32_t position; } __attribute__((packed)) sync_pos_t;
-
-static sync_pos_t                      sync_pos[2];
-static DYNAMIXEL::InfoSyncWriteInst_t  sw_info;
-static DYNAMIXEL::XELInfoSyncWrite_t   sw_xels[2];
-
-static void init_sync_write()
-{
-    sw_info.packet.p_buf        = nullptr;
-    sw_info.packet.is_completed = false;
-    sw_info.p_xels              = sw_xels;
-    sw_info.addr                = GOAL_POS_ADDR;
-    sw_info.addr_length         = GOAL_POS_LEN;
-    sw_info.xel_count           = 2;
-
-    sw_xels[0].id     = ID_LEFT;
-    sw_xels[0].p_data = (uint8_t*)&sync_pos[0].position;
-    sw_xels[1].id     = ID_RIGHT;
-    sw_xels[1].p_data = (uint8_t*)&sync_pos[1].position;
-}
-
 static inline int32_t deg_to_raw(float deg)
 {
     return (int32_t)(deg * (4096.0f / 360.0f));
@@ -82,18 +67,8 @@ static inline int32_t deg_to_raw(float deg)
 // Move both servos simultaneously via a single Sync Write packet.
 static bool sync_move(float left_deg, float right_deg)
 {
-    sync_pos[0].position        = deg_to_raw(left_deg);
-    sync_pos[1].position        = deg_to_raw(right_deg);
-    sw_info.packet.is_completed = false;
-    return dxl.syncWrite(&sw_info);
-}
-
-// ---- Profile-velocity helper ------------------------------------------------
-static void set_profile_velocity(uint8_t id, float speed_rpm)
-{
-    if (speed_rpm <= 0.0f) return;
-    uint32_t raw = (uint32_t)(speed_rpm / 0.229f);
-    dxl.writeControlTableItem(ControlTableItem::PROFILE_VELOCITY, id, raw);
+    int positions[2] = { deg_to_raw(left_deg), deg_to_raw(right_deg) };
+    return servo_controller->set_postions(positions, 2);
 }
 
 // ---- Response sender --------------------------------------------------------
@@ -103,11 +78,11 @@ static void send_response(Dyn_Response resp_code)
     pkt.startByte = DYN_START_BYTE;
     pkt.response  = (uint8_t)resp_code;
 
-    float left_mA  = dxl.getPresentCurrent(ID_LEFT,  UNIT_MILLI_AMPERE);
-    float right_mA = dxl.getPresentCurrent(ID_RIGHT, UNIT_MILLI_AMPERE);
+    float currents[2];
+    servo_controller->get_current_draw(currents, 2);
 
-    memcpy(&pkt.left_motor_current,  &left_mA,  sizeof(pkt.left_motor_current));
-    memcpy(&pkt.right_motor_current, &right_mA, sizeof(pkt.right_motor_current));
+    memcpy(&pkt.left_motor_current,  &currents[0], sizeof(pkt.left_motor_current));
+    memcpy(&pkt.right_motor_current, &currents[1], sizeof(pkt.right_motor_current));
 
     pkt.endByte = DYN_END_BYTE;
     espSerial.write((const uint8_t*)&pkt, sizeof(pkt));
@@ -133,14 +108,13 @@ static void handle_command(const Dyn_Command_Packet* cmd)
             memcpy(&right_spd, &cmd->right_speed,   sizeof(right_spd));
 
             if (!servos_active) {
-                dxl.torqueOn(ID_LEFT);
-                dxl.torqueOn(ID_RIGHT);
+                servo_controller->torque_on();
                 servos_active = true;
             }
 
             // Override profile velocity only when explicitly requested.
-            set_profile_velocity(ID_LEFT,  left_spd);
-            set_profile_velocity(ID_RIGHT, right_spd);
+            float speeds[2] = { left_spd, right_spd };
+            servo_controller->set_speed(speeds, 2);
 
             bool ok = sync_move(left_deg, right_deg);
             send_response(ok ? DYN_ACK : DYN_FAILURE);
@@ -157,8 +131,7 @@ static void handle_command(const Dyn_Command_Packet* cmd)
             memcpy(&right_deg, &cmd->right_degrees, sizeof(right_deg));
 
             if (!servos_active) {
-                dxl.torqueOn(ID_LEFT);
-                dxl.torqueOn(ID_RIGHT);
+                servo_controller->torque_on();
                 servos_active = true;
             }
 
@@ -167,8 +140,7 @@ static void handle_command(const Dyn_Command_Packet* cmd)
         }
 
         case DYN_STOP:
-            dxl.torqueOff(ID_LEFT);
-            dxl.torqueOff(ID_RIGHT);
+            servo_controller->torque_off();
             servos_active = false;
             send_response(DYN_ACK);
             break;
@@ -213,29 +185,20 @@ void setup()
 {
     pinMode(LED_PIN, OUTPUT);
 
-    dxl.begin(DXL_BAUD);
-    dxl.setPortProtocolVersion(DXL_PROTOCOL);
+    // Constructed here (not as a global object) because Servo_Controller's
+    // constructor does real hardware I/O (dxl.begin, register writes), which
+    // must happen after Arduino's own init() has run, not during static
+    // initialization before setup().
+    servo_controller = new Servo_Controller(dxl, SERVO_IDS, NUM_SERVOS, DXL_PROTOCOL, DXL_BAUD,
+        GOAL_POS_ADDR, GOAL_POS_LEN, OP_POSITION, DEFAULT_PROFILE_VEL_RPM);
 
-    bool dxl_ok = dxl.ping(ID_LEFT) && dxl.ping(ID_RIGHT);
+    bool dxl_ok = servo_controller->ping();
     if (!dxl_ok) {
         blink_led(5, 80, 80);
     } else {
-        dxl.torqueOff(ID_LEFT);
-        dxl.setOperatingMode(ID_LEFT, OP_POSITION);
-        dxl.torqueOn(ID_LEFT);
-
-        dxl.torqueOff(ID_RIGHT);
-        dxl.setOperatingMode(ID_RIGHT, OP_POSITION);
-        dxl.torqueOn(ID_RIGHT);
-
-        // Set default profile velocity for smooth tracking.
-        set_profile_velocity(ID_LEFT,  DEFAULT_PROFILE_VEL_RPM);
-        set_profile_velocity(ID_RIGHT, DEFAULT_PROFILE_VEL_RPM);
-
         servos_active = true;
     }
 
-    init_sync_write();
     last_cmd_ms = millis();
     espSerial.begin(ESP_BAUD);
     blink_led(3, 400, 200);
@@ -247,8 +210,7 @@ void loop()
     poll_esp_serial();
 
     if (servos_active && (millis() - last_cmd_ms > HEARTBEAT_TIMEOUT_MS)) {
-        dxl.torqueOff(ID_LEFT);
-        dxl.torqueOff(ID_RIGHT);
+        servo_controller->torque_off();
         servos_active = false;
     }
 }
