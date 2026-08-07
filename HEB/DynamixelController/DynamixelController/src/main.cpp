@@ -1,9 +1,9 @@
 #include <Arduino.h>
-#include <SoftwareSerial.h>
 #include <DynamixelShield.h>
 #include <Servo_Control.h>
 #include "dynamixel_protocol.h"
 #include "Slave_Side.h"
+
 
 // ---- Dynamixel config -------------------------------------------------------
 DynamixelShield dxl;
@@ -32,10 +32,8 @@ static Servo_Controller* servo_controller = nullptr;
 
 // ---- ESP32 serial link ------------------------------------------------------
 // Hardware Serial (pins 0/1) is owned by DynamixelShield.
-// Pin 2 is DXL_DIR_PIN — do not use for SoftwareSerial.
-// Wire: Arduino pin 10 <- ESP32 TX (GPIO21),  Arduino pin 12 -> ESP32 RX (GPIO35).
-SoftwareSerial espSerial(10, 12);
-const long     ESP_BAUD = 57600;
+// Serial2 used by mega (pins 16 and 17)
+const long     ESP_BAUD = 250000;
 
 // ---- Heartbeat safety -------------------------------------------------------
 #define HEARTBEAT_TIMEOUT_MS 500UL
@@ -85,7 +83,7 @@ static void send_response(Dyn_Response resp_code)
     memcpy(&pkt.right_motor_current, &currents[1], sizeof(pkt.right_motor_current));
 
     pkt.endByte = DYN_END_BYTE;
-    espSerial.write((const uint8_t*)&pkt, sizeof(pkt));
+    Serial2.write((const uint8_t*)&pkt, sizeof(pkt));
 }
 
 // ---- Command handler --------------------------------------------------------
@@ -123,9 +121,6 @@ static void handle_command(const Dyn_Command_Packet* cmd)
 
         case DYN_MOVE_SERVO_FAST:
         {
-            // High-rate control path: move servos, send no response.
-            // Skipping send_response avoids SoftwareSerial TX disabling
-            // interrupts, which would corrupt the incoming RX stream.
             float left_deg, right_deg;
             memcpy(&left_deg,  &cmd->left_degrees,  sizeof(left_deg));
             memcpy(&right_deg, &cmd->right_degrees, sizeof(right_deg));
@@ -154,9 +149,9 @@ static void handle_command(const Dyn_Command_Packet* cmd)
 // ---- Packet accumulator -----------------------------------------------------
 static void poll_esp_serial()
 {
-    while (espSerial.available())
+    while (Serial2.available())
     {
-        uint8_t b = espSerial.read();
+        uint8_t b = Serial2.read();
 
         if (!rx_active) {
             if (b == (uint8_t)DYN_START_BYTE) {
@@ -200,7 +195,7 @@ void setup()
     }
 
     last_cmd_ms = millis();
-    espSerial.begin(ESP_BAUD);
+    Serial2.begin(ESP_BAUD);
     blink_led(3, 400, 200);
 }
 
