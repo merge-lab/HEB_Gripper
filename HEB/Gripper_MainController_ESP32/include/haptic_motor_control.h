@@ -134,6 +134,11 @@ public:
         return (expf(LIMIT_RAMP_EXP * t) - 1.0f) / (expf(LIMIT_RAMP_EXP) - 1.0f);
     }
 
+    /*
+    Returns whether on temperature pause
+    */
+    bool is_temp_paused(){return thermal_paused;}
+
 private:
     HardwareSerial* SerialConnection;         // pointer to serial connection to STM board
 
