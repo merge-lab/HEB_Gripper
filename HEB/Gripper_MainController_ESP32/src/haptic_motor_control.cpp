@@ -7,7 +7,27 @@ void HapticMotorController::send_packet(Command_Packet packet)
 
 bool HapticMotorController::send_command(const Command_Packet& packet, Response_Packet* recieved)
 {
-    send_packet(packet);
+    Command_Packet to_send = packet;
+
+    if (temp_sensor != nullptr)
+    {
+        unsigned long now = millis();
+        if (now >= next_thermal_check)
+        {
+            thermal_paused = temp_sensor->is_temp_exceeded();
+            next_thermal_check = now + (thermal_paused ? THERMAL_RECHECK_INTERVAL_MS
+                                                        : THERMAL_CHECK_INTERVAL_MS);
+        }
+
+        // Override any in-flight force/spring/vibrate/limits request while
+        // too hot; RELAX itself passes through unchanged.
+        if (thermal_paused && to_send.command != RELAX)
+        {
+            to_send = Command_Packet{ START_BYTE, RELAX, 0, 0, 0, 0, 0, 0, END_BYTE };
+        }
+    }
+
+    send_packet(to_send);
 
     // Fire-and-forget: caller didn't ask for a response.
     if (recieved == NULL)

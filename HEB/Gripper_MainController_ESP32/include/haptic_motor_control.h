@@ -7,12 +7,16 @@
 // Wire protocol (command/response packets, framing bytes, enums) is shared
 // with the STM32 motor controller.
 #include "gripper_protocol.h"
+#include "temp_senor.h"
 
 
 class HapticMotorController
 {
 public:
-    HapticMotorController(HardwareSerial* s2): SerialConnection(s2){}
+    // temp_sensor is optional; when set, send_command() pauses force output
+    // (substitutes RELAX) whenever it reports the motor is running too hot.
+    HapticMotorController(HardwareSerial* s2, CJMCU9908_Temp_Sensor* temp_sensor = nullptr)
+        : SerialConnection(s2), temp_sensor(temp_sensor) {}
 
     /*
     Sends a ping and blocks for wait_time or until response
@@ -132,6 +136,13 @@ public:
 
 private:
     HardwareSerial* SerialConnection;         // pointer to serial connection to STM board
+
+    // Thermal protection (see send_command()).
+    CJMCU9908_Temp_Sensor* temp_sensor = nullptr;
+    bool thermal_paused = false;
+    unsigned long next_thermal_check = 0;
+    unsigned long THERMAL_CHECK_INTERVAL_MS   = 5000;  // normal poll rate
+    unsigned long THERMAL_RECHECK_INTERVAL_MS = 1000;  // faster poll while paused
 
     float amplitude = 0.5;
     int current_frequency = 0;
