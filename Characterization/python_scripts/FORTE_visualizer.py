@@ -40,9 +40,8 @@ Y_AXIS_PADDING = 0.3  # fraction of data span added above/below on autorange
 DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
 DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
-DEFAULT_FORCE_LINTHRESH = 1.0  # size of the ~linear region around the force center before log scaling kicks in
-DEFAULT_FORCE_GAMMA = 0.4      # <1.0 compresses large spikes harder; 1.0 = plain symlog
-FORCE_MIN_HALF_SPAN = 6.0      # y-axis around the center never zooms in tighter than +/- this (real units)
+FORCE_Y_MIN = -50.0  # fixed Force plot y-axis range; edit these to match your sensor, values outside get clipped
+FORCE_Y_MAX = 50.0
 
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
@@ -123,40 +122,6 @@ class OneEuroFilter:
 
         cutoff = mincutoff + beta * abs(edx)
         return self.x_filter.apply(x, self._alpha(cutoff, dt))
-
-
-# =========================
-# Symmetric log axis (for the Force plot)
-# =========================
-def symlog(x, center, linthresh, gamma_high=1.0, gamma_low=1.0):
-    d = np.asarray(x, dtype=float) - center
-    gamma = np.where(d >= 0, gamma_high, gamma_low)
-    return np.sign(d) * np.log10(1.0 + np.abs(d) / linthresh) ** gamma
-
-
-def symlog_inv(v, center, linthresh, gamma_high=1.0, gamma_low=1.0):
-    v = np.asarray(v, dtype=float)
-    gamma = np.where(v >= 0, gamma_high, gamma_low)
-    log_mag = np.abs(v) ** (1.0 / gamma)
-    return center + np.sign(v) * linthresh * (10.0 ** log_mag - 1.0)
-
-
-class SymlogAxisItem(pg.AxisItem):
-    """Y axis whose tick labels show real force values even though the
-    plotted data has been symlog-transformed around a moving center."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.center = 0.0
-        self.linthresh = DEFAULT_FORCE_LINTHRESH
-        self.gamma_high = DEFAULT_FORCE_GAMMA
-        self.gamma_low = DEFAULT_FORCE_GAMMA
-
-    def tickStrings(self, values, scale, spacing):
-        return [
-            f"{symlog_inv(v, self.center, self.linthresh, self.gamma_high, self.gamma_low):.3g}"
-            for v in values
-        ]
 
 
 # =========================
@@ -381,25 +346,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.beta_box.setValue(DEFAULT_BETA)
         self.beta_box.setPrefix("beta: ")
 
-        self.force_linthresh_box = QtWidgets.QDoubleSpinBox()
-        self.force_linthresh_box.setRange(1e-6, 1e6)
-        self.force_linthresh_box.setDecimals(6)
-        self.force_linthresh_box.setSingleStep(0.1)
-        self.force_linthresh_box.setValue(DEFAULT_FORCE_LINTHRESH)
-        self.force_linthresh_box.setPrefix("force log linthresh: ")
-
-        self.force_gamma_high_box = QtWidgets.QDoubleSpinBox()
-        self.force_gamma_high_box.setRange(0.05, 2.0)
-        self.force_gamma_high_box.setSingleStep(0.05)
-        self.force_gamma_high_box.setValue(DEFAULT_FORCE_GAMMA)
-        self.force_gamma_high_box.setPrefix("force log gamma (high): ")
-
-        self.force_gamma_low_box = QtWidgets.QDoubleSpinBox()
-        self.force_gamma_low_box.setRange(0.05, 2.0)
-        self.force_gamma_low_box.setSingleStep(0.05)
-        self.force_gamma_low_box.setValue(DEFAULT_FORCE_GAMMA)
-        self.force_gamma_low_box.setPrefix("force log gamma (low): ")
-
         self.status_label = QtWidgets.QLabel("Waiting...")
         self.hz_label = QtWidgets.QLabel("Hz: --")
 
@@ -408,9 +354,6 @@ class SerialPlotter(QtWidgets.QMainWindow):
         layout.addWidget(self.smooth_checkbox)
         layout.addWidget(self.mincutoff_box)
         layout.addWidget(self.beta_box)
-        layout.addWidget(self.force_linthresh_box)
-        layout.addWidget(self.force_gamma_high_box)
-        layout.addWidget(self.force_gamma_low_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.hz_label)
 
@@ -424,13 +367,13 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.plot_top.setLabel("left", "Sensors")
         self.plot_top.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
 
-        self.force_axis = SymlogAxisItem(orientation="left")
-        self.plot_bottom = pg.PlotWidget(axisItems={"left": self.force_axis})
+        self.plot_bottom = pg.PlotWidget()
         self.plot_bottom.showGrid(x=True, y=True)
         self.plot_bottom.addLegend()
         self.plot_bottom.setLabel("bottom", "Time")
         self.plot_bottom.setLabel("left", "Force")
-        self.plot_bottom.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
+        self.plot_bottom.setYRange(FORCE_Y_MIN, FORCE_Y_MAX)
+        self.plot_bottom.enableAutoRange(axis="y", enable=False)
 
         layout.addWidget(self.plot_top)
         layout.addWidget(self.plot_bottom)
@@ -541,29 +484,10 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
         if self.has_force and self.force_curve:
             f = np.array(self.force)
-            f_view = f[mask][::step]
+            f_view = np.clip(f[mask][::step], FORCE_Y_MIN, FORCE_Y_MAX)
 
-            center = float(np.mean(f_view)) if len(f_view) else 0.0
-            linthresh = self.force_linthresh_box.value()
-            gamma_high = self.force_gamma_high_box.value()
-            gamma_low = self.force_gamma_low_box.value()
-
-            self.force_axis.center = center
-            self.force_axis.linthresh = linthresh
-            self.force_axis.gamma_high = gamma_high
-            self.force_axis.gamma_low = gamma_low
-            self.force_curve.setData(t_view, symlog(f_view, center, linthresh, gamma_high, gamma_low))
+            self.force_curve.setData(t_view, f_view)
             self.plot_bottom.setXRange(t0, t[-1])
-
-            y_lo = center - FORCE_MIN_HALF_SPAN
-            y_hi = center + FORCE_MIN_HALF_SPAN
-            if len(f_view):
-                y_lo = min(y_lo, float(np.min(f_view)))
-                y_hi = max(y_hi, float(np.max(f_view)))
-            self.plot_bottom.setYRange(
-                float(symlog(y_lo, center, linthresh, gamma_high, gamma_low)),
-                float(symlog(y_hi, center, linthresh, gamma_high, gamma_low)),
-            )
 
     def closeEvent(self, event):
         self.stop_event.set()
