@@ -40,6 +40,8 @@ Y_AXIS_PADDING = 9.5  # fraction of data span added above/below on autorange
 DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
 DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
+DEFAULT_FORCE_LINTHRESH = 1.0  # size of the ~linear region around the force center before log scaling kicks in
+
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
 
@@ -119,6 +121,32 @@ class OneEuroFilter:
 
         cutoff = mincutoff + beta * abs(edx)
         return self.x_filter.apply(x, self._alpha(cutoff, dt))
+
+
+# =========================
+# Symmetric log axis (for the Force plot)
+# =========================
+def symlog(x, center, linthresh):
+    d = np.asarray(x, dtype=float) - center
+    return np.sign(d) * np.log10(1.0 + np.abs(d) / linthresh)
+
+
+def symlog_inv(v, center, linthresh):
+    v = np.asarray(v, dtype=float)
+    return center + np.sign(v) * linthresh * (10.0 ** np.abs(v) - 1.0)
+
+
+class SymlogAxisItem(pg.AxisItem):
+    """Y axis whose tick labels show real force values even though the
+    plotted data has been symlog-transformed around a moving center."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.center = 0.0
+        self.linthresh = DEFAULT_FORCE_LINTHRESH
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{symlog_inv(v, self.center, self.linthresh):.3g}" for v in values]
 
 
 # =========================
@@ -343,6 +371,13 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.beta_box.setValue(DEFAULT_BETA)
         self.beta_box.setPrefix("beta: ")
 
+        self.force_linthresh_box = QtWidgets.QDoubleSpinBox()
+        self.force_linthresh_box.setRange(1e-6, 1e6)
+        self.force_linthresh_box.setDecimals(6)
+        self.force_linthresh_box.setSingleStep(0.1)
+        self.force_linthresh_box.setValue(DEFAULT_FORCE_LINTHRESH)
+        self.force_linthresh_box.setPrefix("force log linthresh: ")
+
         self.status_label = QtWidgets.QLabel("Waiting...")
         self.hz_label = QtWidgets.QLabel("Hz: --")
 
@@ -351,6 +386,7 @@ class SerialPlotter(QtWidgets.QMainWindow):
         layout.addWidget(self.smooth_checkbox)
         layout.addWidget(self.mincutoff_box)
         layout.addWidget(self.beta_box)
+        layout.addWidget(self.force_linthresh_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.hz_label)
 
@@ -364,7 +400,8 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.plot_top.setLabel("left", "Sensors")
         self.plot_top.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
 
-        self.plot_bottom = pg.PlotWidget()
+        self.force_axis = SymlogAxisItem(orientation="left")
+        self.plot_bottom = pg.PlotWidget(axisItems={"left": self.force_axis})
         self.plot_bottom.showGrid(x=True, y=True)
         self.plot_bottom.addLegend()
         self.plot_bottom.setLabel("bottom", "Time")
@@ -480,7 +517,14 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
         if self.has_force and self.force_curve:
             f = np.array(self.force)
-            self.force_curve.setData(t_view, f[mask][::step])
+            f_view = f[mask][::step]
+
+            center = float(np.mean(f_view)) if len(f_view) else 0.0
+            linthresh = self.force_linthresh_box.value()
+
+            self.force_axis.center = center
+            self.force_axis.linthresh = linthresh
+            self.force_curve.setData(t_view, symlog(f_view, center, linthresh))
             self.plot_bottom.setXRange(t0, t[-1])
 
     def closeEvent(self, event):
