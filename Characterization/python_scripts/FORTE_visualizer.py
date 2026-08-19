@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import math
 import struct
 import datetime
 import queue
@@ -36,6 +37,9 @@ SAVE_FLUSH_INTERVAL = 1.0
 SAVE_DTYPE = np.float32
 Y_AXIS_PADDING = 9.5  # fraction of data span added above/below on autorange
 
+DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
+DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
+
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
 
@@ -67,6 +71,54 @@ def parse_line(line: str):
 def default_save_path():
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.abspath(f"serial_data_{ts}.bin")
+
+
+# =========================
+# One Euro Filter
+# =========================
+class _LowPassFilter:
+    def __init__(self):
+        self.y = None
+        self.s = None
+
+    def apply(self, x, alpha):
+        self.s = x if self.y is None else alpha * x + (1.0 - alpha) * self.s
+        self.y = x
+        return self.s
+
+
+class OneEuroFilter:
+    """Speed-adaptive low-pass filter: smooths steady noise while passing
+    fast transitions (spikes) through with little attenuation or lag."""
+
+    def __init__(self, dcutoff=1.0):
+        self.dcutoff = dcutoff
+        self.x_filter = _LowPassFilter()
+        self.dx_filter = _LowPassFilter()
+        self.t_prev = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def filter(self, t, x, mincutoff, beta):
+        if self.t_prev is None:
+            self.t_prev = t
+            self.x_filter.apply(x, 1.0)
+            self.dx_filter.apply(0.0, 1.0)
+            return x
+
+        dt = t - self.t_prev
+        self.t_prev = t
+        if dt <= 0:
+            return self.x_filter.s
+
+        dx = (x - self.x_filter.y) / dt
+        edx = self.dx_filter.apply(dx, self._alpha(self.dcutoff, dt))
+
+        cutoff = mincutoff + beta * abs(edx)
+        return self.x_filter.apply(x, self._alpha(cutoff, dt))
 
 
 # =========================
@@ -242,6 +294,9 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.force = deque(maxlen=MAX_STORED_POINTS)
         self.force_curve = None
 
+        self.filters = []
+        self.force_filter = None
+
         self.last_hz_time = time.perf_counter()
         self.last_sample_count = 0
         self.current_hz = 0.0
@@ -273,11 +328,29 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.pause_button = QtWidgets.QPushButton("Pause")
         self.pause_button.setCheckable(True)
 
+        self.smooth_checkbox = QtWidgets.QCheckBox("Smoothing")
+        self.smooth_checkbox.setChecked(True)
+
+        self.mincutoff_box = QtWidgets.QDoubleSpinBox()
+        self.mincutoff_box.setRange(0.01, 50.0)
+        self.mincutoff_box.setSingleStep(0.1)
+        self.mincutoff_box.setValue(DEFAULT_MINCUTOFF)
+        self.mincutoff_box.setPrefix("min cutoff: ")
+
+        self.beta_box = QtWidgets.QDoubleSpinBox()
+        self.beta_box.setRange(0.0, 5.0)
+        self.beta_box.setSingleStep(0.01)
+        self.beta_box.setValue(DEFAULT_BETA)
+        self.beta_box.setPrefix("beta: ")
+
         self.status_label = QtWidgets.QLabel("Waiting...")
         self.hz_label = QtWidgets.QLabel("Hz: --")
 
         layout.addWidget(self.horizon_box)
         layout.addWidget(self.pause_button)
+        layout.addWidget(self.smooth_checkbox)
+        layout.addWidget(self.mincutoff_box)
+        layout.addWidget(self.beta_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.hz_label)
 
@@ -305,6 +378,10 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
     def init_channels(self, n):
         self.channels = [deque(maxlen=MAX_STORED_POINTS) for _ in range(n)]
+        self.filters = [OneEuroFilter() for _ in range(n)]
+
+        if self.has_force:
+            self.force_filter = OneEuroFilter()
 
         for i in range(n):
             cb = QtWidgets.QCheckBox(f"T{i}")
@@ -349,14 +426,23 @@ class SerialPlotter(QtWidgets.QMainWindow):
                 else:
                     self.init_channels(len(batch_y[0]))
 
+            smoothing_enabled = self.smooth_checkbox.isChecked()
+            mincutoff = self.mincutoff_box.value()
+            beta = self.beta_box.value()
+
             for t, vals in zip(batch_t, batch_y):
                 self.times.append(t)
 
                 if self.has_force:
-                    self.force.append(vals[-1])
+                    force_val = vals[-1]
+                    if smoothing_enabled:
+                        force_val = self.force_filter.filter(t, force_val, mincutoff, beta)
+                    self.force.append(force_val)
                     vals = vals[:-1]
 
                 for i, v in enumerate(vals):
+                    if smoothing_enabled:
+                        v = self.filters[i].filter(t, v, mincutoff, beta)
                     self.channels[i].append(v)
 
         now = time.perf_counter()
