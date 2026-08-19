@@ -40,8 +40,13 @@ Y_AXIS_PADDING = 0.3  # fraction of data span added above/below on autorange
 DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
 DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
-FORCE_Y_MIN = -50.0  # fixed Force plot y-axis range; edit these to match your sensor, values outside get clipped
-FORCE_Y_MAX = 50.0
+FORCE_Y_MIN = 0.0   # fixed Force plot y-axis range; edit to match your sensor, values outside get clipped
+FORCE_Y_MAX = 30.0
+
+FORCE_PIVOT = (FORCE_Y_MIN + FORCE_Y_MAX) / 2.0  # split point between the low-end and high-end sensitivity curves
+FORCE_LINTHRESH = 1.0    # size of the ~linear region around the pivot before log scaling kicks in
+FORCE_GAMMA_LOW = 1.0    # sensitivity below the pivot (near FORCE_Y_MIN): raise for more resolution, lower to compress
+FORCE_GAMMA_HIGH = 1.0   # sensitivity above the pivot (near FORCE_Y_MAX): raise for more resolution, lower to compress
 
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
@@ -122,6 +127,33 @@ class OneEuroFilter:
 
         cutoff = mincutoff + beta * abs(edx)
         return self.x_filter.apply(x, self._alpha(cutoff, dt))
+
+
+# =========================
+# Symmetric log axis (for the Force plot)
+# =========================
+def symlog(x, pivot, linthresh, gamma_high, gamma_low):
+    d = np.asarray(x, dtype=float) - pivot
+    gamma = np.where(d >= 0, gamma_high, gamma_low)
+    return np.sign(d) * np.log10(1.0 + np.abs(d) / linthresh) ** gamma
+
+
+def symlog_inv(v, pivot, linthresh, gamma_high, gamma_low):
+    v = np.asarray(v, dtype=float)
+    gamma = np.where(v >= 0, gamma_high, gamma_low)
+    log_mag = np.abs(v) ** (1.0 / gamma)
+    return pivot + np.sign(v) * linthresh * (10.0 ** log_mag - 1.0)
+
+
+class SymlogAxisItem(pg.AxisItem):
+    """Y axis whose tick labels show real force values even though the
+    plotted data has been symlog-transformed around a fixed pivot."""
+
+    def tickStrings(self, values, scale, spacing):
+        return [
+            f"{symlog_inv(v, FORCE_PIVOT, FORCE_LINTHRESH, FORCE_GAMMA_HIGH, FORCE_GAMMA_LOW):.3g}"
+            for v in values
+        ]
 
 
 # =========================
@@ -367,12 +399,16 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.plot_top.setLabel("left", "Sensors")
         self.plot_top.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
 
-        self.plot_bottom = pg.PlotWidget()
+        self.force_axis = SymlogAxisItem(orientation="left")
+        self.plot_bottom = pg.PlotWidget(axisItems={"left": self.force_axis})
         self.plot_bottom.showGrid(x=True, y=True)
         self.plot_bottom.addLegend()
         self.plot_bottom.setLabel("bottom", "Time")
         self.plot_bottom.setLabel("left", "Force")
-        self.plot_bottom.setYRange(FORCE_Y_MIN, FORCE_Y_MAX)
+        self.plot_bottom.setYRange(
+            symlog(FORCE_Y_MIN, FORCE_PIVOT, FORCE_LINTHRESH, FORCE_GAMMA_HIGH, FORCE_GAMMA_LOW),
+            symlog(FORCE_Y_MAX, FORCE_PIVOT, FORCE_LINTHRESH, FORCE_GAMMA_HIGH, FORCE_GAMMA_LOW),
+        )
         self.plot_bottom.enableAutoRange(axis="y", enable=False)
 
         layout.addWidget(self.plot_top)
@@ -486,7 +522,9 @@ class SerialPlotter(QtWidgets.QMainWindow):
             f = np.array(self.force)
             f_view = np.clip(f[mask][::step], FORCE_Y_MIN, FORCE_Y_MAX)
 
-            self.force_curve.setData(t_view, f_view)
+            self.force_curve.setData(
+                t_view, symlog(f_view, FORCE_PIVOT, FORCE_LINTHRESH, FORCE_GAMMA_HIGH, FORCE_GAMMA_LOW)
+            )
             self.plot_bottom.setXRange(t0, t[-1])
 
     def closeEvent(self, event):
