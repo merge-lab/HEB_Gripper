@@ -34,6 +34,7 @@ STABLE_LINE_COUNT = 3
 DEFAULT_SAVE_HOURS = 10 * 24
 SAVE_FLUSH_INTERVAL = 1.0
 SAVE_DTYPE = np.float32
+Y_AXIS_PADDING = 9.5  # fraction of data span added above/below on autorange
 
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
@@ -288,12 +289,14 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.plot_top.addLegend()
         self.plot_top.setLabel("bottom", "Time")
         self.plot_top.setLabel("left", "Sensors")
+        self.plot_top.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
 
         self.plot_bottom = pg.PlotWidget()
         self.plot_bottom.showGrid(x=True, y=True)
         self.plot_bottom.addLegend()
         self.plot_bottom.setLabel("bottom", "Time")
         self.plot_bottom.setLabel("left", "Force")
+        self.plot_bottom.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
 
         layout.addWidget(self.plot_top)
         layout.addWidget(self.plot_bottom)
