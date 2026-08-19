@@ -128,13 +128,15 @@ class OneEuroFilter:
 # =========================
 # Symmetric log axis (for the Force plot)
 # =========================
-def symlog(x, center, linthresh, gamma=1.0):
+def symlog(x, center, linthresh, gamma_high=1.0, gamma_low=1.0):
     d = np.asarray(x, dtype=float) - center
+    gamma = np.where(d >= 0, gamma_high, gamma_low)
     return np.sign(d) * np.log10(1.0 + np.abs(d) / linthresh) ** gamma
 
 
-def symlog_inv(v, center, linthresh, gamma=1.0):
+def symlog_inv(v, center, linthresh, gamma_high=1.0, gamma_low=1.0):
     v = np.asarray(v, dtype=float)
+    gamma = np.where(v >= 0, gamma_high, gamma_low)
     log_mag = np.abs(v) ** (1.0 / gamma)
     return center + np.sign(v) * linthresh * (10.0 ** log_mag - 1.0)
 
@@ -147,10 +149,14 @@ class SymlogAxisItem(pg.AxisItem):
         super().__init__(*args, **kwargs)
         self.center = 0.0
         self.linthresh = DEFAULT_FORCE_LINTHRESH
-        self.gamma = DEFAULT_FORCE_GAMMA
+        self.gamma_high = DEFAULT_FORCE_GAMMA
+        self.gamma_low = DEFAULT_FORCE_GAMMA
 
     def tickStrings(self, values, scale, spacing):
-        return [f"{symlog_inv(v, self.center, self.linthresh, self.gamma):.3g}" for v in values]
+        return [
+            f"{symlog_inv(v, self.center, self.linthresh, self.gamma_high, self.gamma_low):.3g}"
+            for v in values
+        ]
 
 
 # =========================
@@ -382,11 +388,17 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.force_linthresh_box.setValue(DEFAULT_FORCE_LINTHRESH)
         self.force_linthresh_box.setPrefix("force log linthresh: ")
 
-        self.force_gamma_box = QtWidgets.QDoubleSpinBox()
-        self.force_gamma_box.setRange(0.05, 2.0)
-        self.force_gamma_box.setSingleStep(0.05)
-        self.force_gamma_box.setValue(DEFAULT_FORCE_GAMMA)
-        self.force_gamma_box.setPrefix("force log gamma: ")
+        self.force_gamma_high_box = QtWidgets.QDoubleSpinBox()
+        self.force_gamma_high_box.setRange(0.05, 2.0)
+        self.force_gamma_high_box.setSingleStep(0.05)
+        self.force_gamma_high_box.setValue(DEFAULT_FORCE_GAMMA)
+        self.force_gamma_high_box.setPrefix("force log gamma (high): ")
+
+        self.force_gamma_low_box = QtWidgets.QDoubleSpinBox()
+        self.force_gamma_low_box.setRange(0.05, 2.0)
+        self.force_gamma_low_box.setSingleStep(0.05)
+        self.force_gamma_low_box.setValue(DEFAULT_FORCE_GAMMA)
+        self.force_gamma_low_box.setPrefix("force log gamma (low): ")
 
         self.status_label = QtWidgets.QLabel("Waiting...")
         self.hz_label = QtWidgets.QLabel("Hz: --")
@@ -397,7 +409,8 @@ class SerialPlotter(QtWidgets.QMainWindow):
         layout.addWidget(self.mincutoff_box)
         layout.addWidget(self.beta_box)
         layout.addWidget(self.force_linthresh_box)
-        layout.addWidget(self.force_gamma_box)
+        layout.addWidget(self.force_gamma_high_box)
+        layout.addWidget(self.force_gamma_low_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.hz_label)
 
@@ -532,12 +545,14 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
             center = float(np.mean(f_view)) if len(f_view) else 0.0
             linthresh = self.force_linthresh_box.value()
-            gamma = self.force_gamma_box.value()
+            gamma_high = self.force_gamma_high_box.value()
+            gamma_low = self.force_gamma_low_box.value()
 
             self.force_axis.center = center
             self.force_axis.linthresh = linthresh
-            self.force_axis.gamma = gamma
-            self.force_curve.setData(t_view, symlog(f_view, center, linthresh, gamma))
+            self.force_axis.gamma_high = gamma_high
+            self.force_axis.gamma_low = gamma_low
+            self.force_curve.setData(t_view, symlog(f_view, center, linthresh, gamma_high, gamma_low))
             self.plot_bottom.setXRange(t0, t[-1])
 
             y_lo = center - FORCE_MIN_HALF_SPAN
@@ -546,8 +561,8 @@ class SerialPlotter(QtWidgets.QMainWindow):
                 y_lo = min(y_lo, float(np.min(f_view)))
                 y_hi = max(y_hi, float(np.max(f_view)))
             self.plot_bottom.setYRange(
-                float(symlog(y_lo, center, linthresh, gamma)),
-                float(symlog(y_hi, center, linthresh, gamma)),
+                float(symlog(y_lo, center, linthresh, gamma_high, gamma_low)),
+                float(symlog(y_hi, center, linthresh, gamma_high, gamma_low)),
             )
 
     def closeEvent(self, event):
