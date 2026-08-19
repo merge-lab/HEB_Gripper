@@ -35,13 +35,13 @@ STABLE_LINE_COUNT = 3
 DEFAULT_SAVE_HOURS = 10 * 24
 SAVE_FLUSH_INTERVAL = 1.0
 SAVE_DTYPE = np.float32
-Y_AXIS_PADDING = 9.5  # fraction of data span added above/below on autorange
+Y_AXIS_PADDING = 0.3  # fraction of data span added above/below on autorange
 
 DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
 DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
 DEFAULT_FORCE_LINTHRESH = 1.0  # size of the ~linear region around the force center before log scaling kicks in
-DEFAULT_FORCE_GAMMA = 1.0      # <1.0 compresses large spikes harder; 1.0 = plain symlog
+DEFAULT_FORCE_GAMMA = 0.4      # <1.0 compresses large spikes harder; 1.0 = plain symlog
 FORCE_MIN_HALF_SPAN = 6.0      # y-axis around the center never zooms in tighter than +/- this (real units)
 
 HEADER_MAGIC = b"SPDT"
