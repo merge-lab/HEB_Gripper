@@ -37,8 +37,8 @@ SAVE_FLUSH_INTERVAL = 1.0
 SAVE_DTYPE = np.float32
 Y_AXIS_PADDING = 0.3  # fraction of data span added above/below on autorange
 
-DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
-DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
+MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
+BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
 FORCE_Y_MIN = 7.0   # fixed Force plot y-axis range; edit to match your sensor, values outside get clipped
 FORCE_Y_MAX = 30.0
@@ -366,26 +366,12 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.smooth_checkbox = QtWidgets.QCheckBox("Smoothing")
         self.smooth_checkbox.setChecked(True)
 
-        self.mincutoff_box = QtWidgets.QDoubleSpinBox()
-        self.mincutoff_box.setRange(0.01, 50.0)
-        self.mincutoff_box.setSingleStep(0.1)
-        self.mincutoff_box.setValue(DEFAULT_MINCUTOFF)
-        self.mincutoff_box.setPrefix("min cutoff: ")
-
-        self.beta_box = QtWidgets.QDoubleSpinBox()
-        self.beta_box.setRange(0.0, 5.0)
-        self.beta_box.setSingleStep(0.01)
-        self.beta_box.setValue(DEFAULT_BETA)
-        self.beta_box.setPrefix("beta: ")
-
         self.status_label = QtWidgets.QLabel("Waiting...")
         self.hz_label = QtWidgets.QLabel("Hz: --")
 
         layout.addWidget(self.horizon_box)
         layout.addWidget(self.pause_button)
         layout.addWidget(self.smooth_checkbox)
-        layout.addWidget(self.mincutoff_box)
-        layout.addWidget(self.beta_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.hz_label)
 
@@ -467,8 +453,8 @@ class SerialPlotter(QtWidgets.QMainWindow):
                     self.init_channels(len(batch_y[0]))
 
             smoothing_enabled = self.smooth_checkbox.isChecked()
-            mincutoff = self.mincutoff_box.value()
-            beta = self.beta_box.value()
+            mincutoff = MINCUTOFF
+            beta = BETA
 
             for t, vals in zip(batch_t, batch_y):
                 self.times.append(t)
