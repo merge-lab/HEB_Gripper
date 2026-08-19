@@ -41,6 +41,7 @@ DEFAULT_MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less 
 DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
 DEFAULT_FORCE_LINTHRESH = 1.0  # size of the ~linear region around the force center before log scaling kicks in
+DEFAULT_FORCE_GAMMA = 1.0      # <1.0 compresses large spikes harder; 1.0 = plain symlog
 
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
@@ -126,14 +127,15 @@ class OneEuroFilter:
 # =========================
 # Symmetric log axis (for the Force plot)
 # =========================
-def symlog(x, center, linthresh):
+def symlog(x, center, linthresh, gamma=1.0):
     d = np.asarray(x, dtype=float) - center
-    return np.sign(d) * np.log10(1.0 + np.abs(d) / linthresh)
+    return np.sign(d) * np.log10(1.0 + np.abs(d) / linthresh) ** gamma
 
 
-def symlog_inv(v, center, linthresh):
+def symlog_inv(v, center, linthresh, gamma=1.0):
     v = np.asarray(v, dtype=float)
-    return center + np.sign(v) * linthresh * (10.0 ** np.abs(v) - 1.0)
+    log_mag = np.abs(v) ** (1.0 / gamma)
+    return center + np.sign(v) * linthresh * (10.0 ** log_mag - 1.0)
 
 
 class SymlogAxisItem(pg.AxisItem):
@@ -144,9 +146,10 @@ class SymlogAxisItem(pg.AxisItem):
         super().__init__(*args, **kwargs)
         self.center = 0.0
         self.linthresh = DEFAULT_FORCE_LINTHRESH
+        self.gamma = DEFAULT_FORCE_GAMMA
 
     def tickStrings(self, values, scale, spacing):
-        return [f"{symlog_inv(v, self.center, self.linthresh):.3g}" for v in values]
+        return [f"{symlog_inv(v, self.center, self.linthresh, self.gamma):.3g}" for v in values]
 
 
 # =========================
@@ -378,6 +381,12 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.force_linthresh_box.setValue(DEFAULT_FORCE_LINTHRESH)
         self.force_linthresh_box.setPrefix("force log linthresh: ")
 
+        self.force_gamma_box = QtWidgets.QDoubleSpinBox()
+        self.force_gamma_box.setRange(0.05, 2.0)
+        self.force_gamma_box.setSingleStep(0.05)
+        self.force_gamma_box.setValue(DEFAULT_FORCE_GAMMA)
+        self.force_gamma_box.setPrefix("force log gamma: ")
+
         self.status_label = QtWidgets.QLabel("Waiting...")
         self.hz_label = QtWidgets.QLabel("Hz: --")
 
@@ -387,6 +396,7 @@ class SerialPlotter(QtWidgets.QMainWindow):
         layout.addWidget(self.mincutoff_box)
         layout.addWidget(self.beta_box)
         layout.addWidget(self.force_linthresh_box)
+        layout.addWidget(self.force_gamma_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.hz_label)
 
@@ -521,10 +531,12 @@ class SerialPlotter(QtWidgets.QMainWindow):
 
             center = float(np.mean(f_view)) if len(f_view) else 0.0
             linthresh = self.force_linthresh_box.value()
+            gamma = self.force_gamma_box.value()
 
             self.force_axis.center = center
             self.force_axis.linthresh = linthresh
-            self.force_curve.setData(t_view, symlog(f_view, center, linthresh))
+            self.force_axis.gamma = gamma
+            self.force_curve.setData(t_view, symlog(f_view, center, linthresh, gamma))
             self.plot_bottom.setXRange(t0, t[-1])
 
     def closeEvent(self, event):
