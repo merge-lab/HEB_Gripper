@@ -42,6 +42,7 @@ DEFAULT_BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
 DEFAULT_FORCE_LINTHRESH = 1.0  # size of the ~linear region around the force center before log scaling kicks in
 DEFAULT_FORCE_GAMMA = 1.0      # <1.0 compresses large spikes harder; 1.0 = plain symlog
+FORCE_MIN_HALF_SPAN = 6.0      # y-axis around the center never zooms in tighter than +/- this (real units)
 
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
@@ -538,6 +539,16 @@ class SerialPlotter(QtWidgets.QMainWindow):
             self.force_axis.gamma = gamma
             self.force_curve.setData(t_view, symlog(f_view, center, linthresh, gamma))
             self.plot_bottom.setXRange(t0, t[-1])
+
+            y_lo = center - FORCE_MIN_HALF_SPAN
+            y_hi = center + FORCE_MIN_HALF_SPAN
+            if len(f_view):
+                y_lo = min(y_lo, float(np.min(f_view)))
+                y_hi = max(y_hi, float(np.max(f_view)))
+            self.plot_bottom.setYRange(
+                float(symlog(y_lo, center, linthresh, gamma)),
+                float(symlog(y_hi, center, linthresh, gamma)),
+            )
 
     def closeEvent(self, event):
         self.stop_event.set()
