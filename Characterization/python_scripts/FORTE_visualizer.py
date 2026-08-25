@@ -40,13 +40,13 @@ Y_AXIS_PADDING = 0.3  # fraction of data span added above/below on autorange
 MINCUTOFF = 1.0  # Hz, cutoff used when signal is steady (higher = less smoothing)
 BETA = 0.05      # how fast cutoff opens up as signal speed increases
 
-FORCE_Y_MIN = 7.0   # fixed Force plot y-axis range; edit to match your sensor, values outside get clipped
-FORCE_Y_MAX = 30.0
+FORCE_Y_MIN = 0.0   # fixed Force plot y-axis range; edit to match your sensor, values outside get clipped
+FORCE_Y_MAX = 20.0
 
-FORCE_PIVOT = (FORCE_Y_MIN + FORCE_Y_MAX) / 2.0  # split point between the low-end and high-end sensitivity curves
-FORCE_LINTHRESH = 0.05   # size of the ~linear region around the pivot before log scaling kicks in
-FORCE_GAMMA_LOW = 20.0    # sensitivity below the pivot (near FORCE_Y_MIN): raise for more resolution, lower to compress
-FORCE_GAMMA_HIGH = 0.1   # sensitivity above the pivot (near FORCE_Y_MAX): raise for more resolution, lower to compress
+FORCE_PIVOT = 3.6        # center of the resting/no-load band (~0-7.2) - keeps max resolution right where small pickups nudge the reading up from baseline
+FORCE_LINTHRESH = 1.0    # size of the ~linear region around the pivot before log scaling kicks in
+FORCE_GAMMA_LOW = 1.0    # sensitivity below the pivot (near FORCE_Y_MIN): raise for more resolution, lower to compress
+FORCE_GAMMA_HIGH = 1.0   # sensitivity above the pivot (near FORCE_Y_MAX): raise for more resolution, lower to compress
 
 HEADER_MAGIC = b"SPDT"
 HEADER_VERSION = 1
