@@ -386,6 +386,7 @@ class SerialPlotter(QtWidgets.QMainWindow):
         self.plot_top.getViewBox().setDefaultPadding(Y_AXIS_PADDING)
 
         self.force_axis = SymlogAxisItem(orientation="left")
+        self.force_axis.setStyle(showValues=False)
         self.plot_bottom = pg.PlotWidget(axisItems={"left": self.force_axis})
         self.plot_bottom.showGrid(x=True, y=True)
         self.plot_bottom.addLegend()
