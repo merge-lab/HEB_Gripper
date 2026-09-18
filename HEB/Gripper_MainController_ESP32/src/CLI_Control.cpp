@@ -105,11 +105,19 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         float left_deg  = 90.0f * (1.0f - t);
         float right_deg = 90.0f + 90.0f * t;
 
+        float actual_left_deg = 0.0f, actual_right_deg = 0.0f;
         if (gripper)
-            gripper->move_servo_fast(left_deg, right_deg);
+        {
+            Dyn_Response_Packet gripResp;
+            if (gripper->move_servo(left_deg, right_deg, 0.0f, 0.0f, &gripResp))
+            {
+                memcpy(&actual_left_deg,  &gripResp.left_motor_position,  sizeof(actual_left_deg));
+                memcpy(&actual_right_deg, &gripResp.right_motor_position, sizeof(actual_right_deg));
+            }
+        }
 
-        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
-                      pos_deg, t, left_deg, right_deg);
+        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f(act=%.1f) R=%.1f(act=%.1f)\n",
+                      pos_deg, t, left_deg, actual_left_deg, right_deg, actual_right_deg);
 
         delay(15);
     }

@@ -45,13 +45,15 @@ typedef struct {
     char     endByte;        // DYN_END_BYTE
 } Dyn_Command_Packet;        // total: 1+1+(4*4)+1 = 19 bytes
 
-// Arduino Uno -> ESP32  (11 bytes)
+// Arduino Uno -> ESP32  (19 bytes)
 typedef struct {
-    char     startByte;           // DYN_START_BYTE
-    uint8_t  response;            // Dyn_Response
-    uint32_t left_motor_current;  // float (mA), bit-cast via memcpy
-    uint32_t right_motor_current; // float (mA), bit-cast via memcpy
-    char     endByte;             // DYN_END_BYTE
-} Dyn_Response_Packet;            // total: 1+1+(2*4)+1 = 11 bytes
+    char     startByte;            // DYN_START_BYTE
+    uint8_t  response;             // Dyn_Response
+    uint32_t left_motor_current;   // float (mA), bit-cast via memcpy
+    uint32_t right_motor_current;  // float (mA), bit-cast via memcpy
+    uint32_t left_motor_position;  // float (deg), bit-cast via memcpy; actual present position
+    uint32_t right_motor_position; // float (deg), bit-cast via memcpy; actual present position
+    char     endByte;              // DYN_END_BYTE
+} Dyn_Response_Packet;             // total: 1+1+(4*4)+1 = 19 bytes
 
 #pragma pack(pop)

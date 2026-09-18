@@ -4,14 +4,17 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include "dynamixel_protocol.h"
-#include "Master_Side.h"
 
-// ESP32-side driver for the Arduino Uno / DynamixelShield gripper board.
+// ESP32-side driver for the Arduino Mega / DynamixelShield gripper board.
 //
 // Wiring (Serial1, default pins — pass RX/TX to begin() to override):
-//   ESP32 TX (GPIO21) -> Arduino Uno pin 10  (SoftwareSerial RX)
-//   ESP32 RX (GPIO35) <- Arduino Uno pin 12  (SoftwareSerial TX)
+//   ESP32 TX (GPIO21)      -> Mega RX2 (pin 17)
+//   ESP32 RX (GPIO35) <- [level shifter] <- Mega TX2 (pin 16)
 //   Common GND
+//
+// The Mega runs at 5V logic and the ESP32 does not tolerate 5V on its GPIOs,
+// so the Mega TX2 -> ESP32 RX leg goes through an external level shifter
+// down to 3.3V. ESP32 TX -> Mega RX2 needs no shifting (3.3V reads as HIGH).
 //
 // Avoid on ESP32: GPIO 2 (LED), 4-6/8-10 (analog), 16/17 (haptic), 19/20 (USB D-/D+).
 
@@ -21,7 +24,8 @@ public:
     DynamixelController(HardwareSerial* serial) : _serial(serial) {}
 
     // Start the serial port. Default pins GPIO35 (RX) / GPIO21 (TX).
-    void begin(long baud = 57600, int rx_pin = 35, int tx_pin = 21);
+    // Default baud (1,000,000) must match ESP_BAUD on the Mega side.
+    void begin(long baud = 1000000, int rx_pin = 35, int tx_pin = 21);
 
     // Send a MOVE_SERVO command. Degrees are absolute goal positions; speed is
     // in RPM (0 = maximum speed). Blocks up to timeout_ms for a response when

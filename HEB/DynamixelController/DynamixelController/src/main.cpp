@@ -2,7 +2,6 @@
 #include <DynamixelShield.h>
 #include <Servo_Control.h>
 #include "dynamixel_protocol.h"
-#include "Slave_Side.h"
 
 
 // ---- Dynamixel config -------------------------------------------------------
@@ -31,9 +30,12 @@ const size_t    NUM_SERVOS    = 2;
 static Servo_Controller* servo_controller = nullptr;
 
 // ---- ESP32 serial link ------------------------------------------------------
-// Hardware Serial (pins 0/1) is owned by DynamixelShield.
-// Serial2 used by mega (pins 16 and 17)
-const long     ESP_BAUD = 250000;
+// DynamixelShield owns Serial (pins 0/1, TTL to servos) on this board --
+// board=megaatmega2560 defines ARDUINO_AVR_MEGA2560, which matches the
+// shield's fixed PCB wiring to pins 0/1/2.
+// Serial2 (pins 16/17) is the dedicated link to the ESP32, level-shifted
+// from 5V (this side) down to 3.3V on the ESP32's RX line.
+const long     ESP_BAUD = 1000000;
 
 // ---- Heartbeat safety -------------------------------------------------------
 #define HEARTBEAT_TIMEOUT_MS 500UL
@@ -62,6 +64,11 @@ static inline int32_t deg_to_raw(float deg)
     return (int32_t)(deg * (4096.0f / 360.0f));
 }
 
+static inline float raw_to_deg(int raw)
+{
+    return raw * (360.0f / 4096.0f);
+}
+
 // Move both servos simultaneously via a single Sync Write packet.
 static bool sync_move(float left_deg, float right_deg)
 {
@@ -81,6 +88,13 @@ static void send_response(Dyn_Response resp_code)
 
     memcpy(&pkt.left_motor_current,  &currents[0], sizeof(pkt.left_motor_current));
     memcpy(&pkt.right_motor_current, &currents[1], sizeof(pkt.right_motor_current));
+
+    int raw_positions[2];
+    servo_controller->get_current_positions(raw_positions, 2);
+    float positions_deg[2] = { raw_to_deg(raw_positions[0]), raw_to_deg(raw_positions[1]) };
+
+    memcpy(&pkt.left_motor_position,  &positions_deg[0], sizeof(pkt.left_motor_position));
+    memcpy(&pkt.right_motor_position, &positions_deg[1], sizeof(pkt.right_motor_position));
 
     pkt.endByte = DYN_END_BYTE;
     Serial2.write((const uint8_t*)&pkt, sizeof(pkt));

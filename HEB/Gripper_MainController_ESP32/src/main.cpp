@@ -2,20 +2,18 @@
 #include "haptic_motor_control.h"
 #include "dynamixel_control.h"
 #include "CLI_Control.h"
-#include "Master_Side.h"
-#include "temp_senor.h"
 
-// I2C temp sensor (CJMCU-9808) monitoring the haptic motor; pauses force output
-// via HapticMotorController::send_command() above 80C until it cools back down.
-// TODO: set real SCL/SDA pins once the sensor is wired up.
-CJMCU9908_Temp_Sensor haptic_temp_sensor(/*scl*/ 9, /*sda*/ 8, /*alert_temp*/ 80);
+// I2C temp sensor (CJMCU-9808) monitoring the haptic motor - disabled for now.
+// Wiring when re-enabled: ESP32 SCL=14 -> sensor SCL, ESP32 SDA=13 -> sensor SDA,
+// common GND. Sensor ALERT pin wired to GPIO 7 but not read by firmware yet.
 
 // UART2 link to the STM32 haptic motor controller.
 // Wiring: ESP32 TX=17 -> STM RX, ESP32 RX=16 <- STM TX, common GND. 115200 8N1.
-HapticMotorController motor(&Serial2, &haptic_temp_sensor);
+HapticMotorController motor(&Serial2, nullptr);
 
-// UART1 link to the Arduino Uno / DynamixelShield gripper board.
-// Wiring: ESP32 TX=21 -> Uno pin 10, ESP32 RX=35 <- Uno pin 12, common GND. 115200 8N1.
+// UART1 link to the Arduino Mega / DynamixelShield gripper board.
+// Wiring: ESP32 TX=21 -> Mega RX2 (pin 17), ESP32 RX=35 <- [level shifter] <- Mega TX2 (pin 16),
+// common GND. 1,000,000 8N1.
 DynamixelController gripper(&Serial1);
 
 void setup() {
