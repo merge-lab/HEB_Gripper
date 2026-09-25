@@ -19,9 +19,10 @@
 // Commands sent from the ESP32 to the Arduino Uno.
 typedef enum {
     DYN_PING            = 0,
-    DYN_MOVE_SERVO      = 1,  // move + send ACK response
+    DYN_MOVE_SERVO      = 1,  // move + send ACK response (current + position)
     DYN_STOP            = 2,
-    DYN_MOVE_SERVO_FAST = 3   // move only, no response — use in high-rate control loops
+    DYN_MOVE_SERVO_FAST = 3,  // move only, no response — use in high-rate control loops
+    DYN_MOVE_SERVO_LOG  = 4   // move + send ACK response (position only, skips current-draw readback)
 } Dyn_Command;
 
 // Responses sent from the Arduino Uno back to the ESP32.

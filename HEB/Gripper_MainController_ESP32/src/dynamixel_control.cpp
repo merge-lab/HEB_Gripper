@@ -9,6 +9,11 @@ bool DynamixelController::send_command(const Dyn_Command_Packet& packet,
                                        Dyn_Response_Packet* response,
                                        unsigned long timeout_ms)
 {
+    // Drop any stale bytes left over from a prior timed-out exchange so a
+    // late reply can never bleed into (and misframe) this call's read.
+    while (_serial->available())
+        _serial->read();
+
     _serial->write((const uint8_t*)&packet, sizeof(packet));
 
     if (response == nullptr)

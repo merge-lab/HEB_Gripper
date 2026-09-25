@@ -19,6 +19,6 @@ void setup() {
 
 void loop() {
   Serial.print("Weight: ");
-  Serial.println(loadcell.get_units(10));
-  delay(200);
+  // get_units blocks until the HX711 has a new sample, so it paces the loop
+  Serial.println(loadcell.get_units(1));
 }

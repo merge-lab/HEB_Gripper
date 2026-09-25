@@ -77,14 +77,18 @@ static bool sync_move(float left_deg, float right_deg)
 }
 
 // ---- Response sender --------------------------------------------------------
-static void send_response(Dyn_Response resp_code)
+// include_current: skip the current-draw readback (2 fewer register reads)
+// for callers that only need position, e.g. DYN_MOVE_SERVO_LOG.
+static void send_response(Dyn_Response resp_code, bool include_current = true)
 {
     Dyn_Response_Packet pkt;
     pkt.startByte = DYN_START_BYTE;
     pkt.response  = (uint8_t)resp_code;
 
-    float currents[2];
-    servo_controller->get_current_draw(currents, 2);
+    float currents[2] = {0.0f, 0.0f};
+    if (include_current) {
+        servo_controller->get_current_draw(currents, 2);
+    }
 
     memcpy(&pkt.left_motor_current,  &currents[0], sizeof(pkt.left_motor_current));
     memcpy(&pkt.right_motor_current, &currents[1], sizeof(pkt.right_motor_current));
@@ -137,6 +141,27 @@ static void handle_command(const Dyn_Command_Packet* cmd)
 
             bool ok = sync_move(left_deg, right_deg);
             send_response(ok ? DYN_ACK : DYN_FAILURE);
+            break;
+        }
+
+        case DYN_MOVE_SERVO_LOG:
+        {
+            float left_deg, right_deg, left_spd, right_spd;
+            memcpy(&left_deg,  &cmd->left_degrees,  sizeof(left_deg));
+            memcpy(&right_deg, &cmd->right_degrees, sizeof(right_deg));
+            memcpy(&left_spd,  &cmd->left_speed,    sizeof(left_spd));
+            memcpy(&right_spd, &cmd->right_speed,   sizeof(right_spd));
+
+            if (!servos_active) {
+                servo_controller->torque_on();
+                servos_active = true;
+            }
+
+            float speeds[2] = { left_spd, right_spd };
+            servo_controller->set_speed(speeds, 2);
+
+            bool ok = sync_move(left_deg, right_deg);
+            send_response(ok ? DYN_ACK : DYN_FAILURE, /*include_current=*/false);
             break;
         }
 

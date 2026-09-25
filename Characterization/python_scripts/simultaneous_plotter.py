@@ -51,7 +51,7 @@ def parse_line(line: str):
 
 # =========================
 def pressure_worker(port, baud, q, stop):
-    ser = serial.Serial(port, baud, timeout=0.001)
+    ser = serial.Serial(port, baud, timeout=0.05)
     time.sleep(2)
     ser.reset_input_buffer()
 
@@ -75,7 +75,7 @@ def pressure_worker(port, baud, q, stop):
 
 # =========================
 def loadcell_worker(port, baud, q, stop):
-    ser = serial.Serial(port, baud, timeout=0.001)
+    ser = serial.Serial(port, baud, timeout=0.05)
     time.sleep(2)
     ser.reset_input_buffer()
 
@@ -85,7 +85,7 @@ def loadcell_worker(port, baud, q, stop):
             continue
 
         line = raw.decode(errors="ignore").strip()
-        if not line.startswith("LC:"):
+        if not line.startswith(("LC:", "Weight:")):
             continue
 
         try:
