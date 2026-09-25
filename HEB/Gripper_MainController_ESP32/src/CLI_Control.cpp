@@ -105,6 +105,79 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         float left_deg  = 90.0f * (1.0f - t);
         float right_deg = 90.0f + 90.0f * t;
 
+        if (gripper)
+            gripper->move_servo_fast(left_deg, right_deg);
+
+        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
+                      pos_deg, t, left_deg, right_deg);
+
+        delay(15);
+    }
+}
+
+// Same as trigger_mapping(), but reads back and logs actual servo position
+// each cycle (slower — move_servo() blocks for the Dynamixel's response).
+// Used by response_plot.py to compare expected vs. actual position.
+void trigger_mapping_log(HapticMotorController* motor, DynamixelController* gripper)
+{
+    float POS_CLOSE, POS_OPEN;
+
+    if (motor->is_calibrated())
+    {
+        POS_CLOSE = motor->get_limit_close();
+        float range = motor->get_limit_open() - motor->get_limit_close();
+        POS_OPEN  = POS_CLOSE - range;
+        Serial.printf("Trigger mapping (logged) ON (calibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
+                      POS_CLOSE, POS_OPEN);
+    }
+    else
+    {
+        Response_Packet init_resp;
+        while (!motor->relax(&init_resp))
+            delay(200);
+        memcpy(&POS_CLOSE, &init_resp.encoder_value, sizeof(POS_CLOSE));
+        POS_OPEN = POS_CLOSE - 47.0f;
+        Serial.printf("Trigger mapping (logged) ON (uncalibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
+                      POS_CLOSE, POS_OPEN);
+    }
+
+    while (true)
+    {
+        // Exit check — non-blocking
+        if (Serial.available())
+        {
+            String line = Serial.readStringUntil('\n');
+            line.trim();
+            if (line.equalsIgnoreCase("e"))
+            {
+                motor->relax(nullptr);
+                if (gripper) gripper->stop(nullptr);
+                Serial.println("Trigger mapping OFF.");
+                return;
+            }
+        }
+
+        // STM32 handles limit gating and ramp at 1 kHz — just send full force.
+        Response_Packet resp;
+        bool ok = motor->set_constant_force(-1.5f, &resp);
+
+        if (!ok)
+        {
+            Serial.println("[TM] no ACK from haptic motor");
+            delay(200);
+            continue;
+        }
+
+        float pos_deg;
+        memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
+
+        float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+
+        float left_deg  = 90.0f * (1.0f - t);
+        float right_deg = 90.0f + 90.0f * t;
+
         float actual_left_deg = 0.0f, actual_right_deg = 0.0f;
         if (gripper)
         {
@@ -230,7 +303,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <l> <r> [spd]   gstop   gping");
-    Serial.println("Modes:   tm (trigger map)   hu (haptic update)   cal (calibrate)   sl (send limits)");
+    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -270,6 +343,10 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (line.equalsIgnoreCase("tm")) {
             trigger_mapping(motor, gripper);
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("tml")) {
+            trigger_mapping_log(motor, gripper);
             relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.equalsIgnoreCase("hu")) {

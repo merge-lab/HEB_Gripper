@@ -90,7 +90,14 @@ static void send_response(Dyn_Response resp_code)
     memcpy(&pkt.right_motor_current, &currents[1], sizeof(pkt.right_motor_current));
 
     int raw_positions[2];
-    servo_controller->get_current_positions(raw_positions, 2);
+    if (!servo_controller->get_current_positions(raw_positions, 2)) {
+        // A partial/failed Sync Read (missed or out-of-order status packet)
+        // can leave stray bytes sitting in the servo bus's RX buffer. Left
+        // alone, those bytes desync every future Sync Read's packet framing
+        // and never recover on their own — drain them so the next read
+        // starts from a clean packet boundary.
+        while (Serial.available()) Serial.read();
+    }
     float positions_deg[2] = { raw_to_deg(raw_positions[0]), raw_to_deg(raw_positions[1]) };
 
     memcpy(&pkt.left_motor_position,  &positions_deg[0], sizeof(pkt.left_motor_position));
