@@ -455,6 +455,17 @@ void gripper_position_mode(DynamixelController* gripper)
     Serial.printf("  ID1 (left) : %.2f .. %.2f deg (span %.2f)\n", r_min, r_max, r_max - r_min);
 }
 
+static const char* dyn_resp_name(uint8_t code)
+{
+    switch (code) {
+        case DYN_ACK:       return "ACK";
+        case DYN_PONG:      return "PONG";
+        case DYN_FAILURE:   return "FAILURE (Mega could not write to the servos)";
+        case DYN_MALFORMED: return "MALFORMED (Mega received a garbled packet)";
+        default:            return "unknown reply code";
+    }
+}
+
 void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm)
 {
     if (!gripper) { Serial.println("no gripper link"); return; }
@@ -471,14 +482,37 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
                       DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
                       DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
 
-    float p0, p1;
-    if (gripper->read_position(&p0, &p1, 200))
-        Serial.printf("[MW] start  ID0=%7.2f ID1=%7.2f\n", p0, p1);
+    float p0 = NAN, p1 = NAN;
+    if (!gripper->read_position(&p0, &p1, 200)) {
+        Serial.println("[MW] no PONG from gripper board - check link / Mega power. Aborting.");
+        return;
+    }
+    const float start0 = p0, start1 = p1;
+    Serial.printf("[MW] start  ID0=%7.2f ID1=%7.2f\n", p0, p1);
+    if (fabsf(id0_deg - start0) < 1.0f) Serial.println("[MW] note: ID0 is already at its goal");
+    if (fabsf(id1_deg - start1) < 1.0f) Serial.println("[MW] note: ID1 is already at its goal");
 
-    Dyn_Response_Packet resp;
-    if (!gripper->move_servo(id0_deg, id1_deg, rpm, rpm, &resp, 300) ||
-        resp.response != DYN_ACK) {
-        Serial.println("[MW] move not ACKed - aborting");
+    // Send the move, retrying a few times. The Mega does several servo bus
+    // transactions before it replies (torque on, speed, move, readback), so
+    // allow a generous timeout, and report *why* it failed.
+    bool acked = false;
+    for (int attempt = 1; attempt <= 3 && !acked; attempt++)
+    {
+        Dyn_Response_Packet resp = {};
+        bool got = gripper->move_servo(id0_deg, id1_deg, rpm, rpm, &resp, 1000);
+        if (got && resp.response == DYN_ACK) {
+            acked = true;
+        } else if (!got) {
+            Serial.printf("[MW] attempt %d: no reply from Mega within 1 s\n", attempt);
+        } else {
+            Serial.printf("[MW] attempt %d: Mega replied %u = %s\n",
+                          attempt, resp.response, dyn_resp_name(resp.response));
+        }
+        if (!acked) delay(50);
+    }
+    if (!acked) {
+        Serial.println("[MW] move failed 3 times - sending STOP (torque off) for safety.");
+        Serial.println("[MW] If FAILURE: check servo LEDs (blinking = hardware error) and power-cycle the servos.");
         gripper->stop(nullptr);
         return;
     }
@@ -487,11 +521,11 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
 
     // The Mega turns torque off if it hears nothing for 500 ms, so keep
     // polling (PING) every 100 ms for the whole move — this also reports
-    // the actual position. Stop when both are within 1 deg and holding
-    // still, or after 20 s.
+    // the actual position. Finish when both are within 1 deg of the goal,
+    // or both have stopped moving for 1.5 s (after the first second), or 20 s.
     unsigned long start = millis();
-    int settled = 0;
-    float last0 = 1e9f, last1 = 1e9f;
+    int still_count = 0, miss_count = 0;
+    float last0 = p0, last1 = p1;
     while (millis() - start < 20000UL)
     {
         if (Serial.available()) {
@@ -504,23 +538,45 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
             }
         }
 
-        if (gripper->read_position(&p0, &p1, 200)) {
+        float n0, n1;
+        if (gripper->read_position(&n0, &n1, 200)) {
+            miss_count = 0;
+            p0 = n0; p1 = n1;
             Serial.printf("[MW] actual ID0=%7.2f (err %+6.2f)  ID1=%7.2f (err %+6.2f)\n",
                           p0, p0 - id0_deg, p1, p1 - id1_deg);
             bool at_goal = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
-            bool still   = fabsf(p0 - last0) < 0.2f && fabsf(p1 - last1) < 0.2f;
-            settled = (at_goal || still) ? settled + 1 : 0;
+            if (at_goal) break;
+            bool still = fabsf(p0 - last0) < 0.2f && fabsf(p1 - last1) < 0.2f;
+            still_count = (still && millis() - start > 1000UL) ? still_count + 1 : 0;
+            if (still_count >= 15) break;
             last0 = p0; last1 = p1;
-            if (settled >= 5) break;   // ~0.5 s steady
+        } else if (++miss_count >= 4) {
+            // ~4 missed polls in a row also lets the Mega heartbeat expire.
+            Serial.println("[MW] lost contact with gripper board (4 missed polls) - aborting");
+            gripper->stop(nullptr);
+            return;
         } else {
-            Serial.println("[MW] no PONG");
+            Serial.println("[MW] missed one position poll");
         }
         delay(100);
     }
 
-    bool reached = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
-    Serial.printf("[MW] done: %s. Torque turns off ~0.5 s after this.\n",
-                  reached ? "reached goal" : "STOPPED SHORT of goal (rejected target or obstruction?)");
+    // Per-servo verdict so a single misbehaving servo is obvious.
+    const float goals[2]  = { id0_deg, id1_deg };
+    const float starts[2] = { start0, start1 };
+    const float ends[2]   = { p0, p1 };
+    for (int i = 0; i < 2; i++) {
+        float err   = ends[i] - goals[i];
+        float moved = fabsf(ends[i] - starts[i]);
+        const char* verdict;
+        if (fabsf(err) < 1.0f)                                 verdict = "reached goal";
+        else if (moved < 0.5f && fabsf(goals[i] - starts[i]) >= 1.0f)
+                                                               verdict = "DID NOT MOVE (target rejected, servo in error, or torque off)";
+        else                                                   verdict = "STOPPED SHORT (obstruction or rejected target)";
+        Serial.printf("[MW] ID%d: start %.2f -> end %.2f (goal %.2f, err %+.2f): %s\n",
+                      i, starts[i], ends[i], goals[i], err, verdict);
+    }
+    Serial.println("[MW] done. Torque turns off ~0.5 s after this.");
 }
 
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)

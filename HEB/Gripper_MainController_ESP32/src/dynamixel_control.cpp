@@ -215,7 +215,22 @@ bool DynamixelController::read_position(float* id0_deg, float* id1_deg,
     if (!send_command(packet, &resp, timeout_ms) || resp.response != DYN_PONG)
         return false;
 
-    if (id0_deg)  memcpy(id0_deg,  &resp.left_motor_position,  sizeof(float));
-    if (id1_deg) memcpy(id1_deg, &resp.right_motor_position, sizeof(float));
+    float p0, p1;
+    memcpy(&p0, &resp.left_motor_position,  sizeof(float));
+    memcpy(&p1, &resp.right_motor_position, sizeof(float));
+
+    // Reject samples that are known glitch patterns from a failed bus read
+    // on the Mega side, rather than passing garbage to callers:
+    //  - NaN/inf or wildly out of range (misframed float)
+    //  - ID1 exactly 0.0: ID1's range is 90..180, so 0.0 means a failed read
+    //  - both exactly equal: seen when one servo's value was copied into the
+    //    other slot; the two ranges barely overlap, so this is never real
+    if (!isfinite(p0) || !isfinite(p1) ||
+        fabsf(p0) > 1500.0f || fabsf(p1) > 1500.0f ||
+        p1 == 0.0f || p0 == p1)
+        return false;
+
+    if (id0_deg) *id0_deg = p0;
+    if (id1_deg) *id1_deg = p1;
     return true;
 }
