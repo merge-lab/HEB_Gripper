@@ -39,6 +39,12 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
 // 'r' resets min/max, 'e' exits and prints the final range.
 void gripper_position_mode(DynamixelController* gripper);
 
+// Slow, watched test move: moves to the (clamped) goals at rpm, polls and
+// prints actual vs goal every 100 ms until settled or 20 s. 'e' stops.
+// Note: the speed persists on the servos for later moves (e.g. tm) until
+// the servos are power-cycled.
+void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm);
+
 /*
 Serial CLI tool for sending and testing commands
 
@@ -56,6 +62,7 @@ Haptic motor:
 Gripper (Dynamixel):
   m <id0> <id1>        move ID0 (phys. right) / ID1 (phys. left), clamped to range
   m <id0> <id1> <spd>  same, at spd RPM
+  mw <id0> <id1> [rpm] slow watched move (default 5 rpm), prints actual vs goal
   gstop              torque off both servos
   gping              ping the Arduino gripper board
   gpos               torque off + stream positions (find range of motion)

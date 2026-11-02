@@ -455,6 +455,74 @@ void gripper_position_mode(DynamixelController* gripper)
     Serial.printf("  ID1 (left) : %.2f .. %.2f deg (span %.2f)\n", r_min, r_max, r_max - r_min);
 }
 
+void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm)
+{
+    if (!gripper) { Serial.println("no gripper link"); return; }
+
+    // Slow, watched move for testing targets. rpm <= 0 would mean "leave the
+    // previous speed" (often unlimited), so refuse it here.
+    if (!(rpm > 0.0f) || rpm > 30.0f) {
+        Serial.println("[MW] rpm must be > 0 and <= 30");
+        return;
+    }
+
+    if (DynamixelController::clamp_to_range(&id0_deg, &id1_deg))
+        Serial.printf("[MW] clamped to range: ID0 %.1f..%.1f, ID1 %.1f..%.1f\n",
+                      DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
+                      DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
+
+    float p0, p1;
+    if (gripper->read_position(&p0, &p1, 200))
+        Serial.printf("[MW] start  ID0=%7.2f ID1=%7.2f\n", p0, p1);
+
+    Dyn_Response_Packet resp;
+    if (!gripper->move_servo(id0_deg, id1_deg, rpm, rpm, &resp, 300) ||
+        resp.response != DYN_ACK) {
+        Serial.println("[MW] move not ACKed - aborting");
+        gripper->stop(nullptr);
+        return;
+    }
+    Serial.printf("[MW] goal   ID0=%7.2f ID1=%7.2f at %.1f rpm  ('e' + Enter = stop, torque off)\n",
+                  id0_deg, id1_deg, rpm);
+
+    // The Mega turns torque off if it hears nothing for 500 ms, so keep
+    // polling (PING) every 100 ms for the whole move — this also reports
+    // the actual position. Stop when both are within 1 deg and holding
+    // still, or after 20 s.
+    unsigned long start = millis();
+    int settled = 0;
+    float last0 = 1e9f, last1 = 1e9f;
+    while (millis() - start < 20000UL)
+    {
+        if (Serial.available()) {
+            String l = Serial.readStringUntil('\n');
+            l.trim();
+            if (l.equalsIgnoreCase("e")) {
+                gripper->stop(nullptr);
+                Serial.println("[MW] stopped by user (torque off)");
+                return;
+            }
+        }
+
+        if (gripper->read_position(&p0, &p1, 200)) {
+            Serial.printf("[MW] actual ID0=%7.2f (err %+6.2f)  ID1=%7.2f (err %+6.2f)\n",
+                          p0, p0 - id0_deg, p1, p1 - id1_deg);
+            bool at_goal = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
+            bool still   = fabsf(p0 - last0) < 0.2f && fabsf(p1 - last1) < 0.2f;
+            settled = (at_goal || still) ? settled + 1 : 0;
+            last0 = p0; last1 = p1;
+            if (settled >= 5) break;   // ~0.5 s steady
+        } else {
+            Serial.println("[MW] no PONG");
+        }
+        delay(100);
+    }
+
+    bool reached = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
+    Serial.printf("[MW] done: %s. Torque turns off ~0.5 s after this.\n",
+                  reached ? "reached goal" : "STOPPED SHORT of goal (rejected target or obstruction?)");
+}
+
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 {
     pinMode(SWITCH_40_PIN, INPUT_PULLUP);
@@ -484,7 +552,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     }
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
-    Serial.println("Gripper: m <id0> <id1> [spd]   gstop   gping   gpos (find range)");
+    Serial.println("Gripper: m <id0> <id1> [spd]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
@@ -533,6 +601,23 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (line.equalsIgnoreCase("gpos")) {
             gripper_position_mode(gripper);
+        }
+        // Must come before the generic single-letter 'm' handler below.
+        else if ((line.startsWith("mw") || line.startsWith("MW") ||
+                  line.startsWith("mW") || line.startsWith("Mw")) && gripper) {
+            // mw <id0_deg> <id1_deg> [rpm]
+            String a = line.substring(2);
+            a.trim();
+            int sp1 = a.indexOf(' ');
+            int sp2 = (sp1 >= 0) ? a.indexOf(' ', sp1 + 1) : -1;
+            if (sp1 < 0) {
+                Serial.println("usage: mw <id0_deg> <id1_deg> [rpm]   (default 5 rpm)");
+            } else {
+                float id0 = a.toFloat();
+                float id1 = a.substring(sp1 + 1).toFloat();
+                float rpm = (sp2 >= 0) ? a.substring(sp2 + 1).toFloat() : 5.0f;
+                gripper_move_watch(gripper, id0, id1, rpm);
+            }
         }
         else if (line.equalsIgnoreCase("hu")) {
             haptic_update_mode(motor, gripper);

@@ -32,12 +32,13 @@
 //   ID 0: closed 436 deg (= 76.07), open 341 deg (= -19)
 //   ID 1: closed 91.67,             open 184.92
 // Chosen: closed = 75 (ID 0) / 90 (ID 1), 90 deg of opening travel.
-// ID 0's open end would be 75 - 90 = -15 deg, but single-turn position mode
-// can't take goals below 0, so ID 0 is limited to 75..0 (75 deg of travel).
-// To get the full 90 deg on ID 0, set a -180 deg Homing Offset on ID 0 via
-// Dynamixel Wizard and shift the ID 0 constants by +180.
+// ID 0's open end is 75 - 90 = -15 deg (4 deg short of its -19 hard stop).
+// UNTESTED: in single-turn position mode the servo is expected to reject
+// goals below 0 (it holds its last goal rather than wrapping). Verify with
+// 'mw' before relying on it; if ID 0 stops at ~0, set this back to 0.0f or
+// add a -180 deg Homing Offset on ID 0 via Dynamixel Wizard.
 const float DXL_ID0_CLOSED_DEG = 75.0f;     // physical right finger
-const float DXL_ID0_OPEN_DEG   = 0.0f;      // reachable limit (wanted: -15)
+const float DXL_ID0_OPEN_DEG   = -15.0f;
 const float DXL_ID1_CLOSED_DEG = 90.0f;     // physical left finger
 const float DXL_ID1_OPEN_DEG   = 180.0f;
 
