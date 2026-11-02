@@ -40,6 +40,14 @@ public:
     // loops — avoids the Arduino's SoftwareSerial TX blocking its RX.
     void move_servo_fast(float left_deg, float right_deg);
 
+    // Send a MOVE_SERVO_LOG command: same as move_servo(), but the Arduino
+    // skips its current-draw readback (response only carries position).
+    // Lower latency than move_servo() for callers that don't need current —
+    // used by trigger_mapping_log()/response_plot.py.
+    bool move_servo_log(float left_deg, float right_deg,
+                        Dyn_Response_Packet* response,
+                        unsigned long timeout_ms = 200);
+
     // Stop both servos (torque off).
     bool stop(Dyn_Response_Packet* response = nullptr,
               unsigned long timeout_ms = 200);

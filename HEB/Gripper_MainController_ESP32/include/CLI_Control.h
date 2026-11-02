@@ -19,7 +19,10 @@ Used to setup CLI testing mode, put into void setup
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper = nullptr);
 
 // Maps trigger position to gripper open/close angle in a continuous loop.
-// Haptic runs at constant force 1.5. Type 'e' + Enter to exit.
+// Starts at constant force 0.75 (same sign convention as CLI c).
+// While mapping: 'c <force>' changes force, 'v <hz> <amp>' overlays vibration
+// (0 Hz or amplitude 0 disables it). Type 'e' + Enter to relax and exit.
+// Accepts CR/LF line endings, or processes input after the Serial idle timeout.
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper);
 
 // Same as trigger_mapping(), but reads back and logs actual servo position

@@ -573,11 +573,11 @@ void loop_1ms()
     const float B_EST = 0.0f;   // viscous damping term (tune later)
     float user_torque = -motor_torque + J_EST * alpha + B_EST * speed_filt;   // B) user torque
 
-    /* ----- Debug ----- */
+    /* ----- Telemetry: refresh every 1 ms control tick ----- */
 
     static uint32_t counter = 0;
 
-    if (++counter >= 20) {
+    if (++counter >= 1) {
         counter = 0;
 
         debug_position = pos_deg;

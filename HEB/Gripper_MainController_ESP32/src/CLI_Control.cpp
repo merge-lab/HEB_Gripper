@@ -1,4 +1,29 @@
 #include "CLI_Control.h"
+#include <esp_timer.h>
+#include <math.h>
+
+namespace {
+constexpr uint8_t SWITCH_40_PIN = 40;
+constexpr uint8_t SWITCH_41_PIN = 41;
+constexpr uint8_t SWITCH_LED_PIN = 42;
+
+volatile bool ledOn = false;
+esp_timer_handle_t ledBlinkTimer = nullptr;
+
+void blinkLed(void*) {
+    ledOn = !ledOn;
+    digitalWrite(SWITCH_LED_PIN, ledOn ? HIGH : LOW);
+}
+
+const char* ledState() {
+    return ledOn ? "ON" : "OFF";
+}
+
+const char* switchState(uint8_t pin) {
+    // GPIO -> switch -> GND: closed is ON, open is pulled HIGH.
+    return digitalRead(pin) == LOW ? "ON" : "OFF";
+}
+}
 
 // Send the current vibration setting and report the ACK.
 void applyVibrate(int freq, float amp, HapticMotorController* motor) {
@@ -30,10 +55,10 @@ void force_ramp_up(HapticMotorController* motor) {
         memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
         memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
         unsigned long raw_enc = (unsigned long)resp.raw_encoder;
-        Serial.printf("[RAMP con] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
-                      force, pos_deg, raw_enc, torque, motor_t, user_t);
+        Serial.printf("[RAMP con] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f switch40=%s switch41=%s led42=%s\n",
+                      force, pos_deg, raw_enc, torque, motor_t, user_t, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
       } else {
-        Serial.println("no ACK (rejected or timed out)");
+        Serial.printf("no ACK (rejected or timed out) switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
       }
       delay(200);
     }
@@ -46,6 +71,11 @@ void force_ramp_up(HapticMotorController* motor) {
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
 {
     float POS_CLOSE, POS_OPEN;
+    float force = -0.75f;
+    String input;
+    input.reserve(80);
+    bool inputOverflow = false;
+    unsigned long lastInputMs = 0;
 
     if (motor->is_calibrated())
     {
@@ -68,13 +98,51 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
                       POS_CLOSE, POS_OPEN);
     }
 
+    Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
+
     while (true)
     {
-        // Exit check — non-blocking
-        if (Serial.available())
+        // Accept LF, CR, CRLF, or the normal Serial idle timeout when the
+        // terminal sends no line ending. Never block mapping while waiting.
+        // Bound work and storage to keep mapping responsive.
+        for (int bytes = 0; bytes < 64; ++bytes)
         {
-            String line = Serial.readStringUntil('\n');
+            char ch;
+            if (Serial.available() > 0)
+            {
+                int received = Serial.read();
+                if (received < 0) break;
+                ch = static_cast<char>(received);
+                lastInputMs = millis();
+            }
+            else if ((input.length() > 0 || inputOverflow) &&
+                     static_cast<unsigned long>(millis() - lastInputMs) >= Serial.getTimeout())
+            {
+                // Match readStringUntil()'s fallback without its blocking wait.
+                ch = '\n';
+            }
+            else
+                break;
+
+            if (ch != '\n' && ch != '\r')
+            {
+                if (input.length() < 79 && !inputOverflow)
+                    input += ch;
+                else
+                    inputOverflow = true;
+                continue;
+            }
+
+            String line = input;
+            input = "";
+            if (inputOverflow)
+            {
+                inputOverflow = false;
+                Serial.println("[TM] command too long; discarded.");
+                continue;
+            }
             line.trim();
+            if (line.length() == 0) continue;
             if (line.equalsIgnoreCase("e"))
             {
                 motor->relax(nullptr);
@@ -82,15 +150,44 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
                 Serial.println("Trigger mapping OFF.");
                 return;
             }
+
+            String arg = line.substring(1);
+            char extra;
+            if (line.charAt(0) == 'c' || line.charAt(0) == 'C')
+            {
+                float requestedForce;
+                if (sscanf(arg.c_str(), " %f %c", &requestedForce, &extra) == 1 &&
+                    isfinite(requestedForce))
+                {
+                    // Match the normal CLI: positive input applies negative torque.
+                    force = -requestedForce;
+                    Serial.printf("[TM] base = constant %.3f\n", force);
+                }
+                else
+                    Serial.println("[TM] usage: c <force>");
+            }
+            else if (line.charAt(0) == 'v' || line.charAt(0) == 'V')
+            {
+                int frequency;
+                float amplitude;
+                if (sscanf(arg.c_str(), " %d %f %c", &frequency, &amplitude, &extra) == 2 &&
+                    frequency >= 0 && frequency <= 400 && isfinite(amplitude) && amplitude >= 0.0f)
+                    applyVibrate(frequency, amplitude, motor);
+                else
+                    Serial.println("[TM] usage: v <hz 0..400> <amp >= 0>");
+            }
+            else
+                Serial.println("[TM] commands: c <force>, v <hz> <amp>, e");
         }
 
-        // STM32 handles limit gating and ramp at 1 kHz — just send full force.
+        // Keep the selected base force and heartbeat active; the STM32 retains
+        // the vibration overlay and handles limit gating and ramp at 1 kHz.
         Response_Packet resp;
-        bool ok = motor->set_constant_force(-1.5f, &resp);
+        bool ok = motor->set_constant_force(force, &resp);
 
         if (!ok)
         {
-            Serial.println("[TM] no ACK from haptic motor");
+            Serial.printf("[TM] no ACK from haptic motor switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
             delay(200);
             continue;
         }
@@ -108,8 +205,8 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         if (gripper)
             gripper->move_servo_fast(left_deg, right_deg);
 
-        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
-                      pos_deg, t, left_deg, right_deg);
+        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f switch40=%s switch41=%s led42=%s\n",
+                      pos_deg, t, left_deg, right_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
 
         delay(15);
     }
@@ -163,7 +260,7 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
 
         if (!ok)
         {
-            Serial.println("[TM] no ACK from haptic motor");
+            Serial.printf("[TM] no ACK from haptic motor switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
             delay(200);
             continue;
         }
@@ -182,15 +279,22 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
         if (gripper)
         {
             Dyn_Response_Packet gripResp;
-            if (gripper->move_servo(left_deg, right_deg, 0.0f, 0.0f, &gripResp))
+            // Time the gripper command/response round trip, excluding the
+            // STM32 exchange, terminal output, and the loop's 15 ms delay.
+            uint32_t latency_start_us = micros();
+            bool grip_ok = gripper->move_servo_log(left_deg, right_deg, &gripResp);
+            uint32_t latency_us = (uint32_t)(micros() - latency_start_us);
+            if (grip_ok)
             {
                 memcpy(&actual_left_deg,  &gripResp.left_motor_position,  sizeof(actual_left_deg));
                 memcpy(&actual_right_deg, &gripResp.right_motor_position, sizeof(actual_right_deg));
             }
+            // Serial.printf("latency = %.3f ms%s\n", latency_us / 1000.0f,
+            //               grip_ok ? "" : " (timeout or invalid response)");
         }
 
-        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f(act=%.1f) R=%.1f(act=%.1f)\n",
-                      pos_deg, t, left_deg, actual_left_deg, right_deg, actual_right_deg);
+        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f(act=%.1f) R=%.1f(act=%.1f) switch40=%s switch41=%s led42=%s\n",
+                      pos_deg, t, left_deg, actual_left_deg, right_deg, actual_right_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
 
         delay(15);
     }
@@ -262,7 +366,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             bool ok = motor->update_force_slip(norm_force, norm_slip, &resp);
             if (!ok)
             {
-                Serial.println("[HU] no ACK from haptic motor");
+                Serial.printf("[HU] no ACK from haptic motor switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
                 delay(200);
                 continue;
             }
@@ -277,13 +381,13 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             float right_deg = 90.0f + 90.0f * t;
             gripper->move_servo_fast(left_deg, right_deg);
 
-            Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f L=%.1f R=%.1f\n",
-                          norm_force, norm_slip, pos_deg, t, left_deg, right_deg);
+            Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f L=%.1f R=%.1f switch40=%s switch41=%s led42=%s\n",
+                          norm_force, norm_slip, pos_deg, t, left_deg, right_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
         }
         else
         {
             motor->update_force_slip(norm_force, norm_slip);
-            Serial.printf("[HU] f=%.2f s=%.2f\n", norm_force, norm_slip);
+            Serial.printf("[HU] f=%.2f s=%.2f switch40=%s switch41=%s led42=%s\n", norm_force, norm_slip, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
         }
 
         delay(15);
@@ -292,6 +396,23 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
 
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 {
+    pinMode(SWITCH_40_PIN, INPUT_PULLUP);
+    pinMode(SWITCH_41_PIN, INPUT_PULLUP);
+    digitalWrite(SWITCH_LED_PIN, LOW);
+    pinMode(SWITCH_LED_PIN, OUTPUT);
+    // Temporary LED test: toggle every 500 ms, independently of switches/CLI.
+    esp_timer_create_args_t timerArgs = {};
+    timerArgs.callback = blinkLed;
+    timerArgs.name = "led42_blink";
+    esp_err_t timerResult = esp_timer_create(&timerArgs, &ledBlinkTimer);
+    if (timerResult == ESP_OK)
+        timerResult = esp_timer_start_periodic(ledBlinkTimer, 500000);
+    if (timerResult != ESP_OK)
+        Serial.printf("LED blink timer failed: %s\n", esp_err_to_name(timerResult));
+    else
+        Serial.println("LED test: GPIO 42 flashing, 500 ms ON / 500 ms OFF.");
+    Serial.printf("Switches: switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+
     bool pong = motor->ping_controller(500);
     digitalWrite(2, pong ? HIGH : LOW);
     Serial.println(pong ? "haptic link up (PONG)" : "haptic no PONG - check link");
@@ -461,14 +582,14 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
         memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
         unsigned long raw_enc = (unsigned long)resp.raw_encoder;   // raw counter, plain integer
-        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f\n",
+        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f switch40=%s switch41=%s led42=%s\n",
                       relaxed ? "RELAX" : "ON",
                       mode == MODE_SPRING ? "spr" : "con", value,
                       vibFreq, vibAmp, sweep ? " SWEEP" : "",
                       relaxed ? 0.0f : value,
-                      pos_deg, raw_enc, torque, motor_t, user_t);
+                      pos_deg, raw_enc, torque, motor_t, user_t, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
     } else {
-        Serial.println("no ACK (rejected or timed out)");
+        Serial.printf("no ACK (rejected or timed out) switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
     }
 
     delay(200);

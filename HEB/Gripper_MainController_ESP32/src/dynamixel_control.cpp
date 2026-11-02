@@ -119,6 +119,27 @@ void DynamixelController::move_servo_fast(float left_deg, float right_deg)
     _serial->write((const uint8_t*)&packet, sizeof(packet));
 }
 
+bool DynamixelController::move_servo_log(float left_deg, float right_deg,
+                                         Dyn_Response_Packet* response,
+                                         unsigned long timeout_ms)
+{
+    uint32_t left_bits, right_bits, zero = 0;
+    memcpy(&left_bits,  &left_deg,  sizeof(left_bits));
+    memcpy(&right_bits, &right_deg, sizeof(right_bits));
+
+    Dyn_Command_Packet packet = {
+        DYN_START_BYTE,
+        DYN_MOVE_SERVO_LOG,
+        left_bits,
+        right_bits,
+        zero,
+        zero,
+        DYN_END_BYTE
+    };
+
+    return send_command(packet, response, timeout_ms);
+}
+
 bool DynamixelController::stop(Dyn_Response_Packet* response,
                                unsigned long timeout_ms)
 {
