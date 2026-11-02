@@ -166,3 +166,22 @@ bool DynamixelController::ping(unsigned long timeout_ms)
     bool ok = send_command(packet, &resp, timeout_ms);
     return ok && (resp.response == DYN_PONG);
 }
+
+bool DynamixelController::read_position(float* left_deg, float* right_deg,
+                                        unsigned long timeout_ms)
+{
+    Dyn_Command_Packet packet = {
+        DYN_START_BYTE,
+        DYN_PING,
+        0, 0, 0, 0,
+        DYN_END_BYTE
+    };
+
+    Dyn_Response_Packet resp = {};
+    if (!send_command(packet, &resp, timeout_ms) || resp.response != DYN_PONG)
+        return false;
+
+    if (left_deg)  memcpy(left_deg,  &resp.left_motor_position,  sizeof(float));
+    if (right_deg) memcpy(right_deg, &resp.right_motor_position, sizeof(float));
+    return true;
+}

@@ -394,6 +394,62 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
     }
 }
 
+void gripper_position_mode(DynamixelController* gripper)
+{
+    if (!gripper) { Serial.println("no gripper link"); return; }
+
+    // Torque off so the fingers can be moved by hand. Only STOP and PING are
+    // sent here, which mean the same thing in every Mega firmware version.
+    Dyn_Response_Packet stop_resp;
+    if (!gripper->stop(&stop_resp, 300))
+        Serial.println("[GP] WARNING: no STOP ACK - torque may still be on");
+
+    Serial.println("Position mode ON: torque OFF - move fingers by hand to each limit.");
+    Serial.println("  'r' + Enter resets min/max, 'e' + Enter exits.");
+
+    float l_min =  1e9f, l_max = -1e9f;
+    float r_min =  1e9f, r_max = -1e9f;
+    int   fails = 0;
+
+    while (true)
+    {
+        if (Serial.available())
+        {
+            String line = Serial.readStringUntil('\n');
+            line.trim();
+            if (line.equalsIgnoreCase("e"))
+                break;
+            if (line.equalsIgnoreCase("r")) {
+                l_min = r_min =  1e9f;
+                l_max = r_max = -1e9f;
+                Serial.println("[GP] min/max reset");
+            }
+        }
+
+        float l, r;
+        if (gripper->read_position(&l, &r, 200))
+        {
+            fails = 0;
+            if (l < l_min) l_min = l;
+            if (l > l_max) l_max = l;
+            if (r < r_min) r_min = r;
+            if (r > r_max) r_max = r;
+            Serial.printf("[GP] L=%7.2f [%7.2f..%7.2f]   R=%7.2f [%7.2f..%7.2f]\n",
+                          l, l_min, l_max, r, r_min, r_max);
+        }
+        else if (++fails % 10 == 1)
+        {
+            Serial.println("[GP] no PONG from gripper board");
+        }
+
+        delay(100);
+    }
+
+    Serial.println("Position mode OFF. Measured range:");
+    Serial.printf("  Left : %.2f .. %.2f deg (span %.2f)\n", l_min, l_max, l_max - l_min);
+    Serial.printf("  Right: %.2f .. %.2f deg (span %.2f)\n", r_min, r_max, r_max - r_min);
+}
+
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 {
     pinMode(SWITCH_40_PIN, INPUT_PULLUP);
@@ -423,7 +479,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     }
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
-    Serial.println("Gripper: m <l> <r> [spd]   gstop   gping");
+    Serial.println("Gripper: m <l> <r> [spd]   gstop   gping   gpos (find range)");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
@@ -469,6 +525,9 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         else if (line.equalsIgnoreCase("tml")) {
             trigger_mapping_log(motor, gripper);
             relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("gpos")) {
+            gripper_position_mode(gripper);
         }
         else if (line.equalsIgnoreCase("hu")) {
             haptic_update_mode(motor, gripper);

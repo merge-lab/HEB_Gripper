@@ -34,6 +34,11 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
 // 'd' toggles Dynamixel actuation from trigger, 'e' exits.
 void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripper);
 
+// Range-of-motion finder. Turns servo torque off so the fingers can be moved
+// by hand, then streams present L/R positions with running min/max.
+// 'r' resets min/max, 'e' exits and prints the final range.
+void gripper_position_mode(DynamixelController* gripper);
+
 /*
 Serial CLI tool for sending and testing commands
 
@@ -53,6 +58,7 @@ Gripper (Dynamixel):
   m <l> <r> <spd>    move to l/r degrees at spd RPM
   gstop              torque off both servos
   gping              ping the Arduino gripper board
+  gpos               torque off + stream positions (find range of motion)
 */
 void CLI(HapticMotorController* motor, DynamixelController* gripper = nullptr);
 

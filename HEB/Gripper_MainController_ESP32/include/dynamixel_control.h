@@ -55,6 +55,12 @@ public:
     // Ping the Arduino; returns true if PONG received within timeout_ms.
     bool ping(unsigned long timeout_ms = 200);
 
+    // Read both servos' present positions (deg). Uses DYN_PING, whose PONG
+    // reply already carries positions, so it never changes torque state and
+    // needs no Mega-side changes. Returns true on a valid PONG.
+    bool read_position(float* left_deg, float* right_deg,
+                       unsigned long timeout_ms = 200);
+
 private:
     HardwareSerial* _serial;
 
