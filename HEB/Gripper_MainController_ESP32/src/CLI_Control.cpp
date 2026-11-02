@@ -199,14 +199,14 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
 
-        float left_deg  = 90.0f * (1.0f - t);
-        float right_deg = 90.0f + 90.0f * t;
-
+        // t = 0 (trigger at rest) -> gripper closed, t = 1 -> fully open.
+        float id0_deg, id1_deg;
+        DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
         if (gripper)
-            gripper->move_servo_fast(left_deg, right_deg);
+            gripper->move_servo_fast(id0_deg, id1_deg);
 
-        Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f R=%.1f switch40=%s switch41=%s led42=%s\n",
-                      pos_deg, t, left_deg, right_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+        Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
+                      pos_deg, t, id0_deg, id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
 
         delay(15);
     }
@@ -272,29 +272,31 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
 
-        float left_deg  = 90.0f * (1.0f - t);
-        float right_deg = 90.0f + 90.0f * t;
-
-        float actual_left_deg = 0.0f, actual_right_deg = 0.0f;
+        // t = 0 (trigger at rest) -> gripper closed, t = 1 -> fully open.
+        float id0_deg, id1_deg;
+        DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
+        float actual_id0_deg = 0.0f, actual_id1_deg = 0.0f;
         if (gripper)
         {
             Dyn_Response_Packet gripResp;
             // Time the gripper command/response round trip, excluding the
             // STM32 exchange, terminal output, and the loop's 15 ms delay.
             uint32_t latency_start_us = micros();
-            bool grip_ok = gripper->move_servo_log(left_deg, right_deg, &gripResp);
+            bool grip_ok = gripper->move_servo_log(id0_deg, id1_deg, &gripResp);
             uint32_t latency_us = (uint32_t)(micros() - latency_start_us);
             if (grip_ok)
             {
-                memcpy(&actual_left_deg,  &gripResp.left_motor_position,  sizeof(actual_left_deg));
-                memcpy(&actual_right_deg, &gripResp.right_motor_position, sizeof(actual_right_deg));
+                memcpy(&actual_id0_deg,  &gripResp.left_motor_position,  sizeof(actual_id0_deg));
+                memcpy(&actual_id1_deg, &gripResp.right_motor_position, sizeof(actual_id1_deg));
             }
             // Serial.printf("latency = %.3f ms%s\n", latency_us / 1000.0f,
             //               grip_ok ? "" : " (timeout or invalid response)");
         }
 
+        // Keep the L=/R= format: response_plot.py parses it.
+        // L = ID 0 (physical right), R = ID 1 (physical left).
         Serial.printf("[TM] pos=%+.2f t=%.2f L=%.1f(act=%.1f) R=%.1f(act=%.1f) switch40=%s switch41=%s led42=%s\n",
-                      pos_deg, t, left_deg, actual_left_deg, right_deg, actual_right_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+                      pos_deg, t, id0_deg, actual_id0_deg, id1_deg, actual_id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
 
         delay(15);
     }
@@ -377,12 +379,15 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             if (t < 0.0f) t = 0.0f;
             if (t > 1.0f) t = 1.0f;
 
-            float left_deg  = 90.0f * (1.0f - t);
-            float right_deg = 90.0f + 90.0f * t;
-            gripper->move_servo_fast(left_deg, right_deg);
+            // t = 0 (trigger at rest) -> gripper closed, t = 1 -> fully open.
 
-            Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f L=%.1f R=%.1f switch40=%s switch41=%s led42=%s\n",
-                          norm_force, norm_slip, pos_deg, t, left_deg, right_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+            float id0_deg, id1_deg;
+
+            DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
+            gripper->move_servo_fast(id0_deg, id1_deg);
+
+            Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
+                          norm_force, norm_slip, pos_deg, t, id0_deg, id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
         }
         else
         {
@@ -434,7 +439,7 @@ void gripper_position_mode(DynamixelController* gripper)
             if (l > l_max) l_max = l;
             if (r < r_min) r_min = r;
             if (r > r_max) r_max = r;
-            Serial.printf("[GP] L=%7.2f [%7.2f..%7.2f]   R=%7.2f [%7.2f..%7.2f]\n",
+            Serial.printf("[GP] ID0=%7.2f [%7.2f..%7.2f]   ID1=%7.2f [%7.2f..%7.2f]\n",
                           l, l_min, l_max, r, r_min, r_max);
         }
         else if (++fails % 10 == 1)
@@ -446,8 +451,8 @@ void gripper_position_mode(DynamixelController* gripper)
     }
 
     Serial.println("Position mode OFF. Measured range:");
-    Serial.printf("  Left : %.2f .. %.2f deg (span %.2f)\n", l_min, l_max, l_max - l_min);
-    Serial.printf("  Right: %.2f .. %.2f deg (span %.2f)\n", r_min, r_max, r_max - r_min);
+    Serial.printf("  ID0 (right): %.2f .. %.2f deg (span %.2f)\n", l_min, l_max, l_max - l_min);
+    Serial.printf("  ID1 (left) : %.2f .. %.2f deg (span %.2f)\n", r_min, r_max, r_max - r_min);
 }
 
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
@@ -479,7 +484,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     }
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
-    Serial.println("Gripper: m <l> <r> [spd]   gstop   gping   gpos (find range)");
+    Serial.println("Gripper: m <id0> <id1> [spd]   gstop   gping   gpos (find range)");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
@@ -583,18 +588,23 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                 vibAmp  = (sp >= 0) ? arg.substring(sp + 1).toFloat() : vibAmp;
                 applyVibrate(vibFreq, vibAmp, motor);
             } else if ((ch == 'm' || ch == 'M') && gripper) {
-                // m <left_deg> <right_deg> [speed_rpm]
+                // m <id0_deg> <id1_deg> [speed_rpm]
                 int sp1 = arg.indexOf(' ');
                 int sp2 = (sp1 >= 0) ? arg.indexOf(' ', sp1 + 1) : -1;
                 float l_deg = arg.toFloat();
                 float r_deg = (sp1 >= 0) ? arg.substring(sp1 + 1).toFloat() : l_deg;
                 float spd   = (sp2 >= 0) ? arg.substring(sp2 + 1).toFloat() : 0.0f;
+                // move_servo() clamps too; clamp here first so we can report it.
+                if (DynamixelController::clamp_to_range(&l_deg, &r_deg))
+                    Serial.printf("clamped to range: ID0 %.1f..%.1f, ID1 %.1f..%.1f\n",
+                                  DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
+                                  DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
                 Dyn_Response_Packet resp;
                 bool ok = gripper->move_servo(l_deg, r_deg, spd, spd, &resp);
                 float lmA, rmA;
                 memcpy(&lmA, &resp.left_motor_current,  sizeof(lmA));
                 memcpy(&rmA, &resp.right_motor_current, sizeof(rmA));
-                Serial.printf("move L=%.1f R=%.1f spd=%.0f -> %s (L=%.0fmA R=%.0fmA)\n",
+                Serial.printf("move ID0=%.1f ID1=%.1f spd=%.0f -> %s (ID0=%.0fmA ID1=%.0fmA)\n",
                               l_deg, r_deg, spd,
                               ok ? (resp.response == DYN_ACK ? "ACK" : "FAIL") : "no resp",
                               lmA, rmA);

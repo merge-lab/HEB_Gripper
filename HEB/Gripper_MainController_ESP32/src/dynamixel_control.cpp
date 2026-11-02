@@ -1,5 +1,32 @@
 #include "dynamixel_control.h"
 
+static bool clamp_between(float* v, float a, float b)
+{
+    float lo = (a < b) ? a : b;
+    float hi = (a < b) ? b : a;
+    // NaN fails both comparisons below; pin it to the closed end instead.
+    if (*v != *v) { *v = a; return true; }
+    if (*v < lo)  { *v = lo; return true; }
+    if (*v > hi)  { *v = hi; return true; }
+    return false;
+}
+
+bool DynamixelController::clamp_to_range(float* id0_deg, float* id1_deg)
+{
+    bool c0 = clamp_between(id0_deg, DXL_ID0_CLOSED_DEG, DXL_ID0_OPEN_DEG);
+    bool c1 = clamp_between(id1_deg, DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
+    return c0 || c1;
+}
+
+void DynamixelController::opening_to_goals(float g, float* id0_deg, float* id1_deg)
+{
+    if (g != g)    g = 0.0f;
+    if (g < 0.0f)  g = 0.0f;
+    if (g > 1.0f)  g = 1.0f;
+    *id0_deg = DXL_ID0_CLOSED_DEG + g * (DXL_ID0_OPEN_DEG - DXL_ID0_CLOSED_DEG);
+    *id1_deg = DXL_ID1_CLOSED_DEG + g * (DXL_ID1_OPEN_DEG - DXL_ID1_CLOSED_DEG);
+}
+
 void DynamixelController::begin(long baud, int rx_pin, int tx_pin)
 {
     _serial->begin(baud, SERIAL_8N1, rx_pin, tx_pin);
@@ -76,16 +103,19 @@ Dyn_Response_Packet DynamixelController::read_response(bool* valid,
     return result;
 }
 
-bool DynamixelController::move_servo(float left_deg, float right_deg,
-                                     float left_speed, float right_speed,
+bool DynamixelController::move_servo(float id0_deg, float id1_deg,
+                                     float id0_speed, float id1_speed,
                                      Dyn_Response_Packet* response,
                                      unsigned long timeout_ms)
 {
+    clamp_to_range(&id0_deg, &id1_deg);
+
+    // Packet "left" = ID 0, "right" = ID 1 (see dynamixel_control.h).
     uint32_t left_deg_bits, right_deg_bits, left_spd_bits, right_spd_bits;
-    memcpy(&left_deg_bits,  &left_deg,    sizeof(left_deg_bits));
-    memcpy(&right_deg_bits, &right_deg,   sizeof(right_deg_bits));
-    memcpy(&left_spd_bits,  &left_speed,  sizeof(left_spd_bits));
-    memcpy(&right_spd_bits, &right_speed, sizeof(right_spd_bits));
+    memcpy(&left_deg_bits,  &id0_deg,    sizeof(left_deg_bits));
+    memcpy(&right_deg_bits, &id1_deg,   sizeof(right_deg_bits));
+    memcpy(&left_spd_bits,  &id0_speed,  sizeof(left_spd_bits));
+    memcpy(&right_spd_bits, &id1_speed, sizeof(right_spd_bits));
 
     Dyn_Command_Packet packet = {
         DYN_START_BYTE,
@@ -100,11 +130,13 @@ bool DynamixelController::move_servo(float left_deg, float right_deg,
     return send_command(packet, response, timeout_ms);
 }
 
-void DynamixelController::move_servo_fast(float left_deg, float right_deg)
+void DynamixelController::move_servo_fast(float id0_deg, float id1_deg)
 {
+    clamp_to_range(&id0_deg, &id1_deg);
+
     uint32_t left_bits, right_bits, zero = 0;
-    memcpy(&left_bits,  &left_deg,  sizeof(left_bits));
-    memcpy(&right_bits, &right_deg, sizeof(right_bits));
+    memcpy(&left_bits,  &id0_deg,  sizeof(left_bits));
+    memcpy(&right_bits, &id1_deg, sizeof(right_bits));
 
     Dyn_Command_Packet packet = {
         DYN_START_BYTE,
@@ -119,13 +151,15 @@ void DynamixelController::move_servo_fast(float left_deg, float right_deg)
     _serial->write((const uint8_t*)&packet, sizeof(packet));
 }
 
-bool DynamixelController::move_servo_log(float left_deg, float right_deg,
+bool DynamixelController::move_servo_log(float id0_deg, float id1_deg,
                                          Dyn_Response_Packet* response,
                                          unsigned long timeout_ms)
 {
+    clamp_to_range(&id0_deg, &id1_deg);
+
     uint32_t left_bits, right_bits, zero = 0;
-    memcpy(&left_bits,  &left_deg,  sizeof(left_bits));
-    memcpy(&right_bits, &right_deg, sizeof(right_bits));
+    memcpy(&left_bits,  &id0_deg,  sizeof(left_bits));
+    memcpy(&right_bits, &id1_deg, sizeof(right_bits));
 
     Dyn_Command_Packet packet = {
         DYN_START_BYTE,
@@ -167,7 +201,7 @@ bool DynamixelController::ping(unsigned long timeout_ms)
     return ok && (resp.response == DYN_PONG);
 }
 
-bool DynamixelController::read_position(float* left_deg, float* right_deg,
+bool DynamixelController::read_position(float* id0_deg, float* id1_deg,
                                         unsigned long timeout_ms)
 {
     Dyn_Command_Packet packet = {
@@ -181,7 +215,7 @@ bool DynamixelController::read_position(float* left_deg, float* right_deg,
     if (!send_command(packet, &resp, timeout_ms) || resp.response != DYN_PONG)
         return false;
 
-    if (left_deg)  memcpy(left_deg,  &resp.left_motor_position,  sizeof(float));
-    if (right_deg) memcpy(right_deg, &resp.right_motor_position, sizeof(float));
+    if (id0_deg)  memcpy(id0_deg,  &resp.left_motor_position,  sizeof(float));
+    if (id1_deg) memcpy(id1_deg, &resp.right_motor_position, sizeof(float));
     return true;
 }

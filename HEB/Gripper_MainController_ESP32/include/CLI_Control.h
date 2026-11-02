@@ -54,8 +54,8 @@ Haptic motor:
   stop         relax: zero all force (also: x / relax)
 
 Gripper (Dynamixel):
-  m <l> <r>          move to l/r degrees at default speed
-  m <l> <r> <spd>    move to l/r degrees at spd RPM
+  m <id0> <id1>        move ID0 (phys. right) / ID1 (phys. left), clamped to range
+  m <id0> <id1> <spd>  same, at spd RPM
   gstop              torque off both servos
   gping              ping the Arduino gripper board
   gpos               torque off + stream positions (find range of motion)

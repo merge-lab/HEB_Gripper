@@ -18,33 +18,64 @@
 //
 // Avoid on ESP32: GPIO 2 (LED), 4-6/8-10 (analog), 16/17 (haptic), 19/20 (USB D-/D+).
 
+// ---- Servo identity & range of motion ---------------------------------------
+// The wire protocol (and the Mega firmware) call ID 0 "left" and ID 1 "right",
+// but physically it is the other way round:
+//   ID 0 = physical RIGHT finger  -> sent in the packet's left_*  fields
+//   ID 1 = physical LEFT  finger  -> sent in the packet's right_* fields
+// Driver arguments below are therefore named by ID, not by side.
+//
+// Goal ranges in the same degree convention as goal positions. Every goal the
+// ESP32 sends is clamped to these ranges inside the driver.
+//
+// Measured by hand with 'gpos' (torque off), 2026-11-02:
+//   ID 0: closed 436 deg (= 76.07), open 341 deg (= -19)
+//   ID 1: closed 91.67,             open 184.92
+// Chosen: closed = 75 (ID 0) / 90 (ID 1), 90 deg of opening travel.
+// ID 0's open end would be 75 - 90 = -15 deg, but single-turn position mode
+// can't take goals below 0, so ID 0 is limited to 75..0 (75 deg of travel).
+// To get the full 90 deg on ID 0, set a -180 deg Homing Offset on ID 0 via
+// Dynamixel Wizard and shift the ID 0 constants by +180.
+const float DXL_ID0_CLOSED_DEG = 75.0f;     // physical right finger
+const float DXL_ID0_OPEN_DEG   = 0.0f;      // reachable limit (wanted: -15)
+const float DXL_ID1_CLOSED_DEG = 90.0f;     // physical left finger
+const float DXL_ID1_OPEN_DEG   = 180.0f;
+
 class DynamixelController
 {
 public:
+    // Clamp goal positions (deg) to each servo's measured range.
+    // Returns true if either value had to be changed.
+    static bool clamp_to_range(float* id0_deg, float* id1_deg);
+
+    // Map gripper opening g (0 = closed, 1 = fully open, clamped) to goal
+    // positions for both servos, linearly between the measured limits.
+    static void opening_to_goals(float g, float* id0_deg, float* id1_deg);
+
     DynamixelController(HardwareSerial* serial) : _serial(serial) {}
 
     // Start the serial port. Default pins GPIO35 (RX) / GPIO21 (TX).
     // Default baud (1,000,000) must match ESP_BAUD on the Mega side.
     void begin(long baud = 1000000, int rx_pin = 35, int tx_pin = 21);
 
-    // Send a MOVE_SERVO command. Degrees are absolute goal positions; speed is
-    // in RPM (0 = maximum speed). Blocks up to timeout_ms for a response when
-    // response != nullptr; fire-and-forget when nullptr.
+    // Send a MOVE_SERVO command. Degrees are absolute goal positions (clamped
+    // to range); speed is in RPM (0 = maximum speed). Blocks up to timeout_ms
+    // for a response when response != nullptr; fire-and-forget when nullptr.
     // Returns true if ACK received (or nullptr passed).
-    bool move_servo(float left_deg, float right_deg,
-                    float left_speed, float right_speed,
+    bool move_servo(float id0_deg, float id1_deg,
+                    float id0_speed, float id1_speed,
                     Dyn_Response_Packet* response = nullptr,
                     unsigned long timeout_ms = 200);
 
-    // Move servos without waiting for a response. Use this in tight control
-    // loops — avoids the Arduino's SoftwareSerial TX blocking its RX.
-    void move_servo_fast(float left_deg, float right_deg);
+    // Move servos (clamped to range) without waiting for a response. Use this
+    // in tight control loops.
+    void move_servo_fast(float id0_deg, float id1_deg);
 
     // Send a MOVE_SERVO_LOG command: same as move_servo(), but the Arduino
     // skips its current-draw readback (response only carries position).
     // Lower latency than move_servo() for callers that don't need current —
-    // used by trigger_mapping_log()/response_plot.py.
-    bool move_servo_log(float left_deg, float right_deg,
+    // used by trigger_mapping_log()/response_plot.py. Goals are clamped.
+    bool move_servo_log(float id0_deg, float id1_deg,
                         Dyn_Response_Packet* response,
                         unsigned long timeout_ms = 200);
 
@@ -58,7 +89,7 @@ public:
     // Read both servos' present positions (deg). Uses DYN_PING, whose PONG
     // reply already carries positions, so it never changes torque state and
     // needs no Mega-side changes. Returns true on a valid PONG.
-    bool read_position(float* left_deg, float* right_deg,
+    bool read_position(float* id0_deg, float* id1_deg,
                        unsigned long timeout_ms = 200);
 
 private:
