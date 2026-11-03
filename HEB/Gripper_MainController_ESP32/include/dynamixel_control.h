@@ -31,14 +31,13 @@
 // Measured by hand with 'gpos' (torque off), 2026-11-02:
 //   ID 0: closed 436 deg (= 76.07), open 341 deg (= -19)
 //   ID 1: closed 91.67,             open 184.92
-// Chosen: closed = 75 (ID 0) / 90 (ID 1), 90 deg of opening travel.
-// ID 0's open end is 75 - 90 = -15 deg (4 deg short of its -19 hard stop).
-// UNTESTED: in single-turn position mode the servo is expected to reject
-// goals below 0 (it holds its last goal rather than wrapping). Verify with
-// 'mw' before relying on it; if ID 0 stops at ~0, set this back to 0.0f or
-// add a -180 deg Homing Offset on ID 0 via Dynamixel Wizard.
-const float DXL_ID0_CLOSED_DEG = 75.0f;     // physical right finger
-const float DXL_ID0_OPEN_DEG   = -15.0f;
+// Chosen: the original mapping's values, 90 deg of travel on each servo:
+//   ID 0: closed 90 -> open 0     ID 1: closed 90 -> open 180
+// Note ID 0's closed goal (90) is ~14 deg past its measured closed pose
+// (76), so at closed it presses into the other finger / stop. If it trips
+// overload protection (servo stops responding, LED blinks), lower this.
+const float DXL_ID0_CLOSED_DEG = 90.0f;     // physical right finger
+const float DXL_ID0_OPEN_DEG   = 0.0f;
 const float DXL_ID1_CLOSED_DEG = 90.0f;     // physical left finger
 const float DXL_ID1_OPEN_DEG   = 180.0f;
 
