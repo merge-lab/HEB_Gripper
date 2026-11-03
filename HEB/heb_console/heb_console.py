@@ -102,6 +102,10 @@ def save_settings(settings):
     os.replace(tmp, SETTINGS_PATH)               # atomic: never a half-written file
 
 
+# "Tactile mode ON: ... at 2000 Hz (...)": the tac line rate.
+TAC_RATE_RE = re.compile(r"\bat (\d+(?:\.\d+)?) Hz")
+TAC_REANCHOR_S = 0.05
+
 # "SLIP,<avgL>,<avgR>,<slip>" (100 Hz in tac/tmt) and "SLIPCFG,<thr>,<gate>"
 # (the ESP32's confirmation of the active thresholds).
 SLIP_FIELDS = ["avgL", "avgR", "slip"]
@@ -356,6 +360,12 @@ class HebConsole(QtWidgets.QMainWindow):
         self.settings = load_settings()
         self.last_slip_time = -1e9
         self.slip_events = 0
+        # tac sample clock: the ESP32 samples on a hardware timer at the rate
+        # its banner states, so samples are placed at anchor + k / fs rather
+        # than at their (bursty) USB arrival times.
+        self.tac_fs = None
+        self.tac_anchor = 0.0
+        self.tac_k = 0
         self.prev_slip = 0
         self.t0 = None
         self.new_data = False
@@ -777,6 +787,9 @@ class HebConsole(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(300, self.push_slip_settings)
             if line.startswith("Tactile mode ON"):
                 self.set_mode("tac")
+                m = TAC_RATE_RE.search(line)
+                self.tac_fs = float(m.group(1)) if m else None
+                self.tac_k = 0
             elif line.startswith("Tactile mode OFF") or line.startswith("Trigger mapping OFF"):
                 self.set_mode(None)
         if text_lines:
@@ -798,6 +811,15 @@ class HebConsole(QtWidgets.QMainWindow):
         if self.mode != "tac":
             self.set_mode("tac")             # also catches connecting mid-stream
         t = self._stamp(t_host)
+        if self.tac_fs:
+            # Evenly spaced at the ESP32's sample rate. Re-anchor to arrival
+            # time on the first sample, and whenever the two drift apart by
+            # more than TAC_REANCHOR_S (e.g. lines skipped while USB was busy).
+            pred = self.tac_anchor + self.tac_k / self.tac_fs
+            if self.tac_k == 0 or abs(pred - t) > TAC_REANCHOR_S:
+                self.tac_anchor, self.tac_k, pred = t, 0, t
+            self.tac_k += 1
+            t = pred
         self.tac.append(t, {f"T{i + 1}": vals[i] for i in range(N_TAC)})
         if self.rec_writer:
             row = {f"T{i + 1}": vals[i] for i in range(N_TAC)}
