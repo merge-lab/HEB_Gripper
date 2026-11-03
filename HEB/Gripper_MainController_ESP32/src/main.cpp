@@ -19,7 +19,11 @@ DynamixelController gripper(&Serial1);
 
 void setup() {
   pinMode(2, OUTPUT);                          // onboard LED used as a link indicator
-  Serial.begin(115200);                        // USB CDC serial for debug output
+  // Native USB (USB Serial/JTAG): the baud rate is ignored, data moves at USB
+  // full speed. A larger TX buffer lets 'tac 2000' stream (~120 KB/s)
+  // without stalling the loop.
+  Serial.begin(115200);
+  Serial.setTxBufferSize(16384);
   Serial2.begin(115200, SERIAL_8N1, 16, 17);   // link to the STM32
   tactile_begin();                             // ADC pins 4,5,6,8,9,10 for T1..T6
   gripper.begin();                             // link to the Arduino gripper board (GPIO 35/21)

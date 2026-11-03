@@ -46,8 +46,10 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
 void gripper_position_mode(DynamixelController* gripper);
 
 // Tactile-only mode: relaxes the haptic motor and the gripper, then prints
-// T1..T6 (mapped -1..+1) at a fixed 100 Hz. 'e' + Enter exits.
-void tactile_mode(HapticMotorController* motor, DynamixelController* gripper);
+// T1..T6 (tared, -1..+1 scale) at out_hz: every sample when out_hz >= the
+// sample rate (2 kHz), otherwise the block average of each group of samples.
+// 'tare' re-zeroes, 'e' + Enter exits.
+void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, int out_hz = 100);
 
 // Slow, watched test move: moves to the goals (rejected if out of range) at rpm, polls and
 // prints actual vs goal every 100 ms until settled or 20 s. 'e' stops.

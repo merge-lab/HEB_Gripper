@@ -279,7 +279,9 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         }
         if (tactile_force)
         {
-            tactile_latest(tac, true);
+            // Mean of the last ~5 ms of samples: less noise than one sample,
+            // still far faster than the loop.
+            tactile_average(tac, tactile_nominal_hz() / 200, true);
             sumL = clamp_sum(tac[0] + tac[1] + tac[2]);   // T1..T3: left finger (ID 1)
             sumR = clamp_sum(tac[3] + tac[4] + tac[5]);   // T4..T6: right finger (ID 0)
             float s = sumL > sumR ? sumL : sumR;
@@ -728,26 +730,39 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
     Serial.println("[MW] done. Torque turns off ~0.5 s after this.");
 }
 
-void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
+void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, int out_hz)
 {
     // Tactile-only: relax the haptic motor and the gripper so nothing moves
     // while we stream sensor data.
     motor->relax(nullptr);
     if (gripper) gripper->stop(nullptr);
 
-    const unsigned long PERIOD_US = 10000;   // 100 Hz
-    Serial.println("Tactile mode ON: T1..T6 (tared) at 100 Hz. Haptic relaxed, gripper torque off.");
-    Serial.println("'tare' re-zeroes the sensors, 'e' + Enter exits.");
+    // Output rate: every sample (out_hz >= sample rate) or a block average of
+    // `decim` samples per line (a clean low-pass decimation, not a pick).
+    const int fs = tactile_nominal_hz();
+    if (out_hz <= 0) out_hz = 100;
+    int decim = (fs + out_hz / 2) / out_hz;
+    if (decim < 1) decim = 1;
+    const float actual_hz = (float)fs / decim;
 
+    Serial.printf("Tactile mode ON: T1..T6 (tared) at %.0f Hz (%s; %s).\n",
+                  actual_hz, tactile_mode_name(),
+                  decim == 1 ? "every sample" : "block average per line");
+    Serial.println("Haptic relaxed, gripper torque off. 'tare' re-zeroes, 'e' + Enter exits.");
+
+    const int LINE_BYTES = 64;           // one "T1:...,T6:..." line, rounded up
     char  cmd[16];
-    int   cmd_len   = 0;
-    unsigned long samples = 0, overruns = 0;
-    unsigned long next_us = micros();
-    float mapped[TACTILE_COUNT];
+    int   cmd_len = 0;
+    unsigned long lines = 0, usb_skipped = 0;
+    uint32_t dropped = 0;
+    uint32_t cursor = tactile_sample_count();   // start with fresh samples
+    float buf[64][TACTILE_COUNT];
+    float acc[TACTILE_COUNT] = { 0 };
+    int   acc_n = 0;
 
     while (true)
     {
-        // Non-blocking line input: readStringUntil() could stall the loop.
+        // Non-blocking line input: readStringUntil() could stall the stream.
         while (Serial.available()) {
             char c = (char)Serial.read();
             if (c == '\n' || c == '\r') {
@@ -756,8 +771,9 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
                     Serial.println(tactile_tare() ? "Tactile tared." : "Tare failed (no samples yet).");
                 }
                 if (cmd_len == 1 && (cmd[0] == 'e' || cmd[0] == 'E')) {
-                    Serial.printf("Tactile mode OFF. %lu samples, %lu late (>10 ms) cycles.\n",
-                                  samples, overruns);
+                    Serial.printf("Tactile mode OFF. %lu lines, %lu samples dropped (reader behind), "
+                                  "%lu lines skipped (USB busy), ADC rate %.0f Hz.\n",
+                                  lines, (unsigned long)dropped, usb_skipped, tactile_measured_hz());
                     return;
                 }
                 cmd_len = 0;
@@ -766,24 +782,22 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
             }
         }
 
-        // Fixed-rate schedule: next_us advances by exactly one period, so the
-        // average rate stays 100 Hz even if a single cycle runs late.
-        long wait = (long)(next_us - micros());
-        if (wait > 0) {
-            if (wait > 1000) delay(wait / 1000 - 1 > 0 ? wait / 1000 - 1 : 0);
-            while ((long)(next_us - micros()) > 0) { }
-        } else if (wait < -(long)PERIOD_US) {
-            // Fell more than a full period behind (e.g. USB stalled):
-            // resync instead of bursting to catch up.
-            overruns++;
-            next_us = micros();
-        }
-        next_us += PERIOD_US;
+        int n = tactile_read_new(&cursor, buf, 64, true, &dropped);
+        for (int k = 0; k < n; k++) {
+            for (int i = 0; i < TACTILE_COUNT; i++) acc[i] += buf[k][i];
+            if (++acc_n < decim) continue;
 
-        tactile_latest(mapped, true);   // newest sample from the 1 kHz buffer, tared
-        samples++;
-        Serial.printf("T1:%.3f,T2:%.3f,T3:%.3f,T4:%.3f,T5:%.3f,T6:%.3f\n",
-                      mapped[0], mapped[1], mapped[2], mapped[3], mapped[4], mapped[5]);
+            float m[TACTILE_COUNT];
+            for (int i = 0; i < TACTILE_COUNT; i++) { m[i] = acc[i] / acc_n; acc[i] = 0.0f; }
+            acc_n = 0;
+            // Never block on USB: if the laptop isn't keeping up (or the port
+            // is closed), skip the line and count it instead of stalling.
+            if (Serial.availableForWrite() < LINE_BYTES) { usb_skipped++; continue; }
+            Serial.printf("T1:%.3f,T2:%.3f,T3:%.3f,T4:%.3f,T5:%.3f,T6:%.3f\n",
+                          m[0], m[1], m[2], m[3], m[4], m[5]);
+            lines++;
+        }
+        if (n == 0) delay(1);            // ~2 new samples per ms at 2 kHz
     }
 }
 
@@ -817,7 +831,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <id0> <id1> [spd]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
-    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac (tactile stream)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
+    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac [hz] (tactile stream, 100 default, 2000 max)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -870,8 +884,10 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         else if (line.equalsIgnoreCase("tare")) {
             Serial.println(tactile_tare() ? "Tactile tared." : "Tare failed (no samples yet).");
         }
-        else if (line.equalsIgnoreCase("tac")) {
-            tactile_mode(motor, gripper);
+        else if (line.equalsIgnoreCase("tac") || line.startsWith("tac ") || line.startsWith("TAC ")) {
+            // tac [hz]: 100 Hz default; 'tac 2000' streams every sample.
+            int hz = line.length() > 4 ? line.substring(4).toInt() : 100;
+            tactile_mode(motor, gripper, hz);
             relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.equalsIgnoreCase("gpos")) {
