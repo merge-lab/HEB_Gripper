@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""HEB Console - serial monitor + live tactile plots for the gripper ESP32.
+
+Replaces the PlatformIO serial monitor for the demo: one window with
+  * a serial console (ESP32 output, command box with history, quick buttons)
+  * live T1..T6 plots (time series + bar view) that light up automatically
+    when the ESP32 is in 'tac' mode, with a sample-rate readout and CSV
+    recording.
+
+Only one program can hold the serial port: close the PlatformIO monitor
+before connecting here.
+
+Run:  ./run.sh            (creates .venv on first run)
+      ./run.sh --port /dev/ttyACM0
+"""
+import argparse
+import collections
+import csv
+import datetime
+import os
+import sys
+import time
+
+import numpy as np
+import serial
+import serial.tools.list_ports
+from PyQt5 import QtCore, QtGui, QtWidgets
+import pyqtgraph as pg
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+N_TAC = 6                      # T1..T6, matches tactile_sensors.h
+SAMPLE_RATE_HZ = 100           # ESP32 'tac' mode rate
+MAX_HISTORY_S = 300            # seconds of tactile data kept for plotting
+DEFAULT_WINDOW_S = 10.0        # visible time window
+PLOT_REFRESH_MS = 33           # ~30 fps redraw
+CONSOLE_MAX_LINES = 5000
+Y_FIXED = (-1.2, 1.2)          # mapped range is -1..+1, a little headroom
+QUICK_COMMANDS = [
+    ("tac", "tac", "Start tactile streaming (100 Hz)"),
+    ("Exit mode", "e", "Exit the current mode (tac, tm, gpos, ...)"),
+    ("gpos", "gpos", "Torque off + stream servo positions"),
+    ("gping", "gping", "Ping the gripper board"),
+    ("gstop", "gstop", "Gripper torque off"),
+    ("relax", "stop", "Relax the haptic motor"),
+]
+
+
+def parse_tactile(line):
+    """'T1:0.1,T2:0.2,...,T6:0.6' -> [0.1, ..., 0.6], else None."""
+    if not line.startswith("T1:"):
+        return None
+    parts = line.split(",")
+    if len(parts) != N_TAC:
+        return None
+    vals = []
+    for i, part in enumerate(parts):
+        key, sep, val = part.partition(":")
+        if not sep or key.strip() != f"T{i + 1}":
+            return None
+        try:
+            vals.append(float(val))
+        except ValueError:
+            return None
+    return vals
+
+
+# ---------------------------------------------------------------------------
+# Serial reader thread
+# ---------------------------------------------------------------------------
+class SerialReader(QtCore.QThread):
+    """Reads lines off the port and hands them to the GUI in batches, so a
+    100 Hz stream doesn't flood the Qt event loop one signal per line."""
+
+    batch = QtCore.pyqtSignal(list)    # [(host_time_s, line_str), ...]
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, ser):
+        super().__init__()
+        self.ser = ser
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        buf = b""
+        pending = []
+        last_emit = time.perf_counter()
+        while not self._stop:
+            try:
+                chunk = self.ser.read(self.ser.in_waiting or 1)
+            except (serial.SerialException, OSError, TypeError) as e:
+                if not self._stop:
+                    self.failed.emit(str(e))
+                return
+            if chunk:
+                buf += chunk
+                now = time.perf_counter()
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    pending.append((now, raw.decode("utf-8", errors="replace").rstrip("\r")))
+            now = time.perf_counter()
+            if pending and (now - last_emit >= 0.02 or len(pending) >= 200):
+                self.batch.emit(pending)
+                pending = []
+                last_emit = now
+        if pending:
+            self.batch.emit(pending)
+
+
+# ---------------------------------------------------------------------------
+# Command box with up/down history
+# ---------------------------------------------------------------------------
+class CommandLine(QtWidgets.QLineEdit):
+    def __init__(self):
+        super().__init__()
+        self.history = []
+        self.hist_idx = 0
+        self.setPlaceholderText("Command (Enter to send, Up/Down for history)")
+
+    def remember(self, text):
+        if text and (not self.history or self.history[-1] != text):
+            self.history.append(text)
+        self.hist_idx = len(self.history)
+
+    def keyPressEvent(self, e):
+        if e.key() == QtCore.Qt.Key_Up and self.history:
+            self.hist_idx = max(0, self.hist_idx - 1)
+            self.setText(self.history[self.hist_idx])
+        elif e.key() == QtCore.Qt.Key_Down and self.history:
+            self.hist_idx = min(len(self.history), self.hist_idx + 1)
+            self.setText(self.history[self.hist_idx] if self.hist_idx < len(self.history) else "")
+        else:
+            super().keyPressEvent(e)
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
+class HebConsole(QtWidgets.QMainWindow):
+    def __init__(self, port=None, baud=115200):
+        super().__init__()
+        self.setWindowTitle("HEB Console")
+        self.resize(1400, 820)
+
+        self.ser = None
+        self.reader = None
+
+        maxlen = MAX_HISTORY_S * SAMPLE_RATE_HZ
+        self.t = collections.deque(maxlen=maxlen)
+        self.y = [collections.deque(maxlen=maxlen) for _ in range(N_TAC)]
+        self.t0 = None
+        self.new_data = False
+        self.rate_times = collections.deque(maxlen=SAMPLE_RATE_HZ * 3)
+        self.last_sample_time = 0.0
+        self.tac_mode = False
+
+        self.rec_file = None
+        self.rec_writer = None
+        self.rec_count = 0
+        self.rec_t0 = 0.0
+
+        self._build_ui()
+        self.refresh_ports(select=port)
+
+        self.plot_timer = QtCore.QTimer(self)
+        self.plot_timer.timeout.connect(self.redraw)
+        self.plot_timer.start(PLOT_REFRESH_MS)
+
+        self.baud_box.setCurrentText(str(baud))
+        if port:
+            QtCore.QTimer.singleShot(0, self.connect_port)
+
+    # ---- UI ----------------------------------------------------------------
+    def _build_ui(self):
+        central = QtWidgets.QWidget()
+        root = QtWidgets.QVBoxLayout(central)
+        self.setCentralWidget(central)
+
+        # Connection bar
+        bar = QtWidgets.QHBoxLayout()
+        self.port_box = QtWidgets.QComboBox()
+        self.port_box.setMinimumWidth(320)
+        refresh = QtWidgets.QPushButton("Refresh")
+        refresh.clicked.connect(lambda: self.refresh_ports())
+        self.baud_box = QtWidgets.QComboBox()
+        self.baud_box.setEditable(True)
+        self.baud_box.addItems(["115200", "921600", "1000000", "2000000"])
+        self.connect_btn = QtWidgets.QPushButton("Connect")
+        self.connect_btn.clicked.connect(self.toggle_connection)
+        self.status = QtWidgets.QLabel("Disconnected")
+        bar.addWidget(QtWidgets.QLabel("Port"))
+        bar.addWidget(self.port_box)
+        bar.addWidget(refresh)
+        bar.addWidget(QtWidgets.QLabel("Baud"))
+        bar.addWidget(self.baud_box)
+        bar.addWidget(self.connect_btn)
+        bar.addSpacing(16)
+        bar.addWidget(self.status, 1)
+        root.addLayout(bar)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        root.addWidget(split, 1)
+
+        # ---- Left: console
+        left = QtWidgets.QWidget()
+        ll = QtWidgets.QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumBlockCount(CONSOLE_MAX_LINES)
+        self.console.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.console.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        ll.addWidget(self.console, 1)
+
+        opts = QtWidgets.QHBoxLayout()
+        self.show_data_cb = QtWidgets.QCheckBox("Show T-lines in console")
+        self.show_data_cb.setToolTip("Tactile lines arrive at 100 Hz; hide them to keep the console readable")
+        self.autoscroll_cb = QtWidgets.QCheckBox("Autoscroll")
+        self.autoscroll_cb.setChecked(True)
+        clear = QtWidgets.QPushButton("Clear")
+        clear.clicked.connect(self.console.clear)
+        opts.addWidget(self.show_data_cb)
+        opts.addWidget(self.autoscroll_cb)
+        opts.addStretch(1)
+        opts.addWidget(clear)
+        ll.addLayout(opts)
+
+        quick = QtWidgets.QHBoxLayout()
+        for label, cmd, tip in QUICK_COMMANDS:
+            b = QtWidgets.QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, c=cmd: self.send(c))
+            quick.addWidget(b)
+        ll.addLayout(quick)
+
+        cmd_row = QtWidgets.QHBoxLayout()
+        self.cmd = CommandLine()
+        self.cmd.returnPressed.connect(self.send_from_box)
+        send = QtWidgets.QPushButton("Send")
+        send.clicked.connect(self.send_from_box)
+        cmd_row.addWidget(self.cmd, 1)
+        cmd_row.addWidget(send)
+        ll.addLayout(cmd_row)
+        split.addWidget(left)
+
+        # ---- Right: tactile plots
+        right = QtWidgets.QWidget()
+        rl = QtWidgets.QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+
+        ctl = QtWidgets.QHBoxLayout()
+        self.mode_label = QtWidgets.QLabel("Tactile: idle")
+        self.mode_label.setStyleSheet("font-weight: bold;")
+        self.hz_label = QtWidgets.QLabel("-- Hz")
+        self.window_box = QtWidgets.QDoubleSpinBox()
+        self.window_box.setRange(0.5, MAX_HISTORY_S)
+        self.window_box.setValue(DEFAULT_WINDOW_S)
+        self.window_box.setSuffix(" s")
+        self.pause_btn = QtWidgets.QPushButton("Pause")
+        self.pause_btn.setCheckable(True)
+        self.autoscale_cb = QtWidgets.QCheckBox("Auto Y")
+        self.record_btn = QtWidgets.QPushButton("Record CSV")
+        self.record_btn.setCheckable(True)
+        self.record_btn.toggled.connect(self.toggle_record)
+        for w in (self.mode_label, self.hz_label):
+            ctl.addWidget(w)
+            ctl.addSpacing(12)
+        ctl.addStretch(1)
+        ctl.addWidget(QtWidgets.QLabel("Window"))
+        ctl.addWidget(self.window_box)
+        ctl.addWidget(self.autoscale_cb)
+        ctl.addWidget(self.pause_btn)
+        ctl.addWidget(self.record_btn)
+        rl.addLayout(ctl)
+
+        self.chan_cbs = []
+        chan_row = QtWidgets.QHBoxLayout()
+        self.value_labels = []
+        colors = [pg.intColor(i, hues=N_TAC) for i in range(N_TAC)]
+        self.colors = colors
+        for i in range(N_TAC):
+            cb = QtWidgets.QCheckBox(f"T{i + 1}")
+            cb.setChecked(True)
+            cb.setStyleSheet(f"color: {colors[i].name()}; font-weight: bold;")
+            cb.toggled.connect(lambda on, k=i: self.curves[k].setVisible(on))
+            self.chan_cbs.append(cb)
+            val = QtWidgets.QLabel("  --  ")
+            val.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+            self.value_labels.append(val)
+            chan_row.addWidget(cb)
+            chan_row.addWidget(val)
+            chan_row.addSpacing(8)
+        chan_row.addStretch(1)
+        rl.addLayout(chan_row)
+
+        self.ts_plot = pg.PlotWidget()
+        self.ts_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.ts_plot.setLabel("bottom", "Time", units="s")
+        self.ts_plot.setLabel("left", "Tactile (mapped)")
+        self.ts_plot.setYRange(*Y_FIXED)
+        self.curves = [
+            self.ts_plot.plot(pen=pg.mkPen(colors[i], width=2), name=f"T{i + 1}")
+            for i in range(N_TAC)
+        ]
+        for c in self.curves:
+            c.setClipToView(True)
+            c.setDownsampling(auto=True, method="peak")
+        rl.addWidget(self.ts_plot, 3)
+
+        self.bar_plot = pg.PlotWidget()
+        self.bar_plot.showGrid(y=True, alpha=0.3)
+        self.bar_plot.setLabel("left", "Now")
+        self.bar_plot.setYRange(*Y_FIXED)
+        self.bar_plot.setXRange(0.4, N_TAC + 0.6)
+        self.bar_plot.getAxis("bottom").setTicks([[(i + 1, f"T{i + 1}") for i in range(N_TAC)]])
+        self.bar_plot.setMouseEnabled(x=False, y=False)
+        self.bars = pg.BarGraphItem(x=np.arange(1, N_TAC + 1), height=np.zeros(N_TAC),
+                                    width=0.6, brushes=colors)
+        self.bar_plot.addItem(self.bars)
+        rl.addWidget(self.bar_plot, 1)
+
+        split.addWidget(right)
+        split.setSizes([560, 840])
+
+    # ---- Connection ---------------------------------------------------------
+    def refresh_ports(self, select=None):
+        current = select or self.port_box.currentData()
+        self.port_box.clear()
+        ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
+        # Real USB devices first; skip the 32 legacy /dev/ttyS* stubs.
+        ports = [p for p in ports if not p.device.startswith("/dev/ttyS")] or ports
+        for p in ports:
+            self.port_box.addItem(f"{p.device}  |  {p.description}", p.device)
+        if current:
+            idx = self.port_box.findData(current)
+            if idx < 0:
+                self.port_box.addItem(current, current)
+                idx = self.port_box.count() - 1
+            self.port_box.setCurrentIndex(idx)
+
+    def toggle_connection(self):
+        if self.ser:
+            self.disconnect_port()
+        else:
+            self.connect_port()
+
+    def connect_port(self):
+        port = self.port_box.currentData()
+        if not port:
+            self.log_local("No port selected.")
+            return
+        try:
+            baud = int(self.baud_box.currentText())
+        except ValueError:
+            self.log_local("Invalid baud rate.")
+            return
+        try:
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = baud
+            ser.timeout = 0.01
+            # Keep DTR/RTS low so opening the port doesn't reset the ESP32-S3.
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+        except (serial.SerialException, OSError) as e:
+            self.log_local(f"Could not open {port}: {e}")
+            if "busy" in str(e).lower() or "permission" in str(e).lower():
+                self.log_local("Is the PlatformIO serial monitor still open? Close it first.")
+            return
+        self.ser = ser
+        self.reader = SerialReader(ser)
+        self.reader.batch.connect(self.on_lines)
+        self.reader.failed.connect(self.on_serial_error)
+        self.reader.start()
+        self.connect_btn.setText("Disconnect")
+        self.status.setText(f"Connected: {port} @ {baud}")
+        self.log_local(f"Connected to {port}.")
+        self.cmd.setFocus()
+
+    def disconnect_port(self):
+        if self.reader:
+            self.reader.stop()
+            self.reader.wait(500)
+            self.reader = None
+        if self.ser:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+        self.connect_btn.setText("Connect")
+        self.status.setText("Disconnected")
+        self.set_tac_mode(False)
+
+    def on_serial_error(self, msg):
+        self.log_local(f"Serial error: {msg} (board unplugged or reset?)")
+        self.disconnect_port()
+
+    # ---- Sending --------------------------------------------------------------
+    def send_from_box(self):
+        text = self.cmd.text().strip()
+        if not text:
+            return
+        self.cmd.remember(text)
+        self.cmd.clear()
+        self.send(text)
+
+    def send(self, text):
+        if not self.ser:
+            self.log_local("Not connected.")
+            return
+        try:
+            self.ser.write((text + "\n").encode("utf-8"))
+        except (serial.SerialException, OSError) as e:
+            self.on_serial_error(str(e))
+            return
+        self.append_console([f">> {text}"])
+
+    # ---- Receiving ------------------------------------------------------------
+    def on_lines(self, items):
+        text_lines = []
+        show_data = self.show_data_cb.isChecked()
+        for t_host, line in items:
+            vals = parse_tactile(line)
+            if vals is None:
+                text_lines.append(line)
+                if line.startswith("Tactile mode ON"):
+                    self.set_tac_mode(True)
+                elif line.startswith("Tactile mode OFF"):
+                    self.set_tac_mode(False)
+                continue
+            if show_data:
+                text_lines.append(line)
+            self.add_sample(t_host, vals)
+        if text_lines:
+            self.append_console(text_lines)
+
+    def add_sample(self, t_host, vals):
+        if not self.tac_mode:
+            # Data arriving means we're in tac mode even if we missed the banner
+            # (e.g. connected mid-stream).
+            self.set_tac_mode(True)
+        if self.t0 is None:
+            self.t0 = t_host
+        self.t.append(t_host - self.t0)
+        for i in range(N_TAC):
+            self.y[i].append(vals[i])
+        self.rate_times.append(t_host)
+        self.last_sample_time = t_host
+        self.new_data = True
+        if self.rec_writer:
+            self.rec_writer.writerow([f"{t_host - self.rec_t0:.4f}"] + [f"{v:.3f}" for v in vals])
+            self.rec_count += 1
+
+    def append_console(self, lines):
+        sb = self.console.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - 4
+        self.console.appendPlainText("\n".join(lines))
+        if self.autoscroll_cb.isChecked() and at_bottom:
+            sb.setValue(sb.maximum())
+
+    def log_local(self, msg):
+        self.append_console([f"-- {msg}"])
+
+    def set_tac_mode(self, on):
+        if on == self.tac_mode:
+            return
+        self.tac_mode = on
+        if on:
+            self.mode_label.setText("Tactile: STREAMING")
+            self.mode_label.setStyleSheet("font-weight: bold; color: #2a9d3a;")
+            # Start a fresh trace each time the mode starts.
+            self.t.clear()
+            for d in self.y:
+                d.clear()
+            self.t0 = None
+            self.rate_times.clear()
+        else:
+            self.mode_label.setText("Tactile: idle")
+            self.mode_label.setStyleSheet("font-weight: bold;")
+            self.hz_label.setText("-- Hz")
+
+    # ---- Plotting -------------------------------------------------------------
+    def redraw(self):
+        now = time.perf_counter()
+        if len(self.rate_times) >= 2 and now - self.last_sample_time < 1.0:
+            span = self.rate_times[-1] - self.rate_times[0]
+            if span > 0:
+                self.hz_label.setText(f"{(len(self.rate_times) - 1) / span:5.1f} Hz")
+        elif self.tac_mode and now - self.last_sample_time > 1.0:
+            self.hz_label.setText("no data")
+
+        if self.rec_writer:
+            self.record_btn.setText(f"Stop ({self.rec_count})")
+
+        if not self.new_data or self.pause_btn.isChecked() or not self.t:
+            return
+        self.new_data = False
+
+        t = np.fromiter(self.t, dtype=float, count=len(self.t))
+        t_end = t[-1]
+        win = self.window_box.value()
+        start = np.searchsorted(t, t_end - win)
+        tw = t[start:]
+        latest = []
+        for i in range(N_TAC):
+            yi = np.fromiter(self.y[i], dtype=float, count=len(self.y[i]))
+            self.curves[i].setData(tw, yi[start:])
+            latest.append(yi[-1])
+            self.value_labels[i].setText(f"{yi[-1]:+.3f}")
+        self.ts_plot.setXRange(max(0.0, t_end - win), max(win, t_end), padding=0)
+        if self.autoscale_cb.isChecked():
+            self.ts_plot.enableAutoRange(axis="y")
+        else:
+            self.ts_plot.setYRange(*Y_FIXED, padding=0)
+        self.bars.setOpts(height=np.array(latest))
+
+    # ---- Recording ------------------------------------------------------------
+    def toggle_record(self, on):
+        if on:
+            default = os.path.abspath(datetime.datetime.now().strftime("tactile_%Y%m%d_%H%M%S.csv"))
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Record tactile data", default, "CSV (*.csv)")
+            if not path:
+                self.record_btn.setChecked(False)
+                return
+            try:
+                self.rec_file = open(path, "w", newline="")
+            except OSError as e:
+                self.log_local(f"Could not open {path}: {e}")
+                self.record_btn.setChecked(False)
+                return
+            self.rec_writer = csv.writer(self.rec_file)
+            self.rec_writer.writerow(["t_s"] + [f"T{i + 1}" for i in range(N_TAC)])
+            self.rec_count = 0
+            self.rec_t0 = time.perf_counter()
+            self.log_local(f"Recording to {path}")
+        else:
+            if self.rec_file:
+                self.rec_file.close()
+                self.log_local(f"Recording stopped: {self.rec_count} samples saved.")
+            self.rec_file = None
+            self.rec_writer = None
+            self.record_btn.setText("Record CSV")
+
+    def closeEvent(self, e):
+        if self.record_btn.isChecked():
+            self.record_btn.setChecked(False)
+        self.disconnect_port()
+        super().closeEvent(e)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", help="serial port to open on start, e.g. /dev/ttyACM0")
+    ap.add_argument("--baud", type=int, default=115200,
+                    help="baud rate (the ESP32-S3 USB port ignores it; default 115200)")
+    args = ap.parse_args()
+
+    app = QtWidgets.QApplication(sys.argv)
+    pg.setConfigOptions(antialias=True)
+    win = HebConsole(port=args.port, baud=args.baud)
+    win.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
