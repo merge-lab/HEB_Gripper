@@ -52,6 +52,7 @@ QUICK_COMMANDS = [
     ("Tare", "tare", "Re-zero the tactile sensors (keep them unloaded)"),
     ("Exit mode", "e", "Exit the current mode (tac, tmt, tm, gpos, ...)"),
     ("gpos", "gpos", "Torque off + stream servo positions"),
+    ("Friction ID", "fid", "Measure trigger friction along its travel (hands off the trigger, ~25 s)"),
     ("gping", "gping", "Ping the gripper board"),
     ("gstop", "gstop", "Gripper torque off"),
     ("relax", "stop", "Relax the haptic motor"),
@@ -183,11 +184,30 @@ class NewtonAxis(pg.AxisItem):
 
 # Commands that start an ESP32 mode. The ESP32 ignores them while another
 # mode is running, so the app exits the current mode ('e') first.
-MODE_COMMANDS = ("tac", "tmt", "tm", "tml", "hu", "gpos", "cal")
+MODE_COMMANDS = ("tac", "tmt", "tm", "tml", "hu", "gpos", "cal", "fid")
 
 
 def is_mode_command(text):
     return text.split()[0].lower() in MODE_COMMANDS if text.split() else False
+
+
+# Trigger friction map: "FRICMAP,<travel>,<n>,<bin_w>,<b_open>,<b_close>,<v_return>,
+# <margin>,<floor_max>", then "FRICBIN,<d>,<f_open>,<f_close>,<floor>" per bin,
+# then "FRICEND" ("FRICMAP,none" if there is no map). Live sweep samples during
+# 'fid': "FIDS,<pos>,<u>,<measured force>".
+FRICTION_CSV = os.path.join(os.path.dirname(SETTINGS_PATH), "friction_map.csv")
+
+
+def parse_floats(line, prefix, count):
+    if not line.startswith(prefix):
+        return None
+    parts = line[len(prefix):].split(",")
+    if len(parts) != count:
+        return None
+    try:
+        return [float(p) for p in parts]
+    except ValueError:
+        return None
 
 
 def parse_tactile(line):
@@ -372,6 +392,8 @@ class HebConsole(QtWidgets.QMainWindow):
         # tac sample clock: the ESP32 samples on a hardware timer at the rate
         # its banner states, so samples are placed at anchor + k / fs rather
         # than at their (bursty) USB arrival times.
+        self.fric_header = None      # FRICMAP fields while a map is arriving
+        self.fric_rows = []
         self.tac_fs = None
         self.tac_anchor = 0.0
         self.tac_k = 0
@@ -650,6 +672,27 @@ class HebConsole(QtWidgets.QMainWindow):
         self.bar_plot.addItem(self.bars)
         rl.addWidget(self.bar_plot)
 
+        # Trigger friction vs position (from 'fid'); x is NOT time.
+        self.fric_plot = pg.PlotWidget(axisItems={"right": NewtonAxis(orientation="right")})
+        self.fric_plot.setMaximumHeight(220)
+        self.fric_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.fric_plot.showAxis("right")
+        self.fric_plot.setLabel("right", "N")
+        self.fric_plot.setLabel("bottom", "Distance from released end", units="deg")
+        self.fric_plot.setLabel("left", "Force (c)")
+        self.fric_plot.addLegend(offset=(5, 5))
+        self.fric_open = self.fric_plot.plot(pen=pg.mkPen(LEFT_COLORS[1], width=2), name="friction toward release")
+        self.fric_close = self.fric_plot.plot(pen=pg.mkPen(RIGHT_COLORS[1], width=2), name="friction toward closed")
+        self.fric_floor = self.fric_plot.plot(pen=pg.mkPen("#4cc38a", width=2, style=QtCore.Qt.DashLine),
+                                              name="tmt force floor")
+        self.fric_cap = pg.InfiniteLine(angle=0, movable=False,
+                                        pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.DotLine),
+                                        label="floor cap", labelOpts={"position": 0.9, "color": "#888888"})
+        self.fric_plot.addItem(self.fric_cap)
+        self.fric_cap.hide()
+        self._set_friction_title("Trigger friction: no map yet - press 'Friction ID' (hands off the trigger)")
+        rl.addWidget(self.fric_plot)
+
         split.addWidget(right)
         split.setSizes([560, 940])
 
@@ -712,6 +755,7 @@ class HebConsole(QtWidgets.QMainWindow):
         self.log_local(f"Connected to {port}.")
         self.slip_sync_label.setText("ESP: sending slip settings...")
         QtCore.QTimer.singleShot(600, self.push_slip_settings)
+        QtCore.QTimer.singleShot(1200, lambda: self.ser and self._write_line("fid?"))
         self.cmd.setFocus()
 
     def disconnect_port(self):
@@ -769,6 +813,16 @@ class HebConsole(QtWidgets.QMainWindow):
         text_lines = []
         show_data = self.show_data_cb.isChecked()
         for t_host, line in items:
+            fids = parse_floats(line, "FIDS,", 3)
+            if fids is not None:
+                self.add_fids(t_host, fids)
+                if show_data:
+                    text_lines.append(line)
+                continue
+            if self.handle_friction_line(line):
+                if show_data:
+                    text_lines.append(line)
+                continue
             tmt = parse_tmt(line)
             if tmt is not None:
                 self.add_tmt(t_host, tmt)
@@ -811,7 +865,10 @@ class HebConsole(QtWidgets.QMainWindow):
                 m = TAC_RATE_RE.search(line)
                 self.tac_fs = float(m.group(1)) if m else None
                 self.tac_k = 0
-            elif line.startswith("Tactile mode OFF") or line.startswith("Trigger mapping OFF"):
+            elif line.startswith("Friction ID ON"):
+                self.set_mode("fid")
+            elif (line.startswith("Tactile mode OFF") or line.startswith("Trigger mapping OFF")
+                  or line.startswith("Friction ID OFF")):
                 self.set_mode(None)
         if text_lines:
             self.append_console(text_lines)
@@ -845,6 +902,71 @@ class HebConsole(QtWidgets.QMainWindow):
         if self.rec_writer:
             row = {f"T{i + 1}": vals[i] for i in range(N_TAC)}
             self._record(t_host, "tac", row)
+
+    def add_fids(self, t_host, vals):
+        # Live 'fid' sweep: shown in the trigger and force panels.
+        if self.mode != "fid":
+            self.set_mode("fid")
+        pos, u, f = vals
+        self.tmt.append(self._stamp(t_host), {"pos": pos, "c": u, "iq": f})
+
+    def handle_friction_line(self, line):
+        if line.startswith("FRICMAP,none"):
+            self.fric_header, self.fric_rows = None, []
+            self._show_friction(None, [])
+            return True
+        hdr = parse_floats(line, "FRICMAP,", 8)
+        if hdr is not None:
+            self.fric_header, self.fric_rows = hdr, []
+            return True
+        row = parse_floats(line, "FRICBIN,", 4)
+        if row is not None:
+            if self.fric_header is not None:
+                self.fric_rows.append(row)
+            return True
+        if line.startswith("FRICEND"):
+            if self.fric_header is not None:
+                self._show_friction(self.fric_header, self.fric_rows)
+                self._save_friction(self.fric_header, self.fric_rows)
+            self.fric_header = None
+            return True
+        return False
+
+    def _set_friction_title(self, text):
+        self.fric_plot.setTitle(text)
+
+    def _show_friction(self, hdr, rows):
+        if not hdr or not rows:
+            for c in (self.fric_open, self.fric_close, self.fric_floor):
+                c.setData([], [])
+            self.fric_cap.hide()
+            self._set_friction_title("Trigger friction: no map yet - press 'Friction ID' (hands off the trigger)")
+            return
+        travel, _n, _w, b_open, b_close, v_ret, margin, cap = hdr
+        d = np.array([r[0] for r in rows])
+        self.fric_open.setData(d, np.array([r[1] for r in rows]))
+        self.fric_close.setData(d, np.array([r[2] for r in rows]))
+        self.fric_floor.setData(d, np.array([r[3] for r in rows]))
+        self.fric_cap.setPos(cap)
+        self.fric_cap.show()
+        self._set_friction_title(
+            f"Trigger friction over {travel:.1f} deg  |  viscous {b_open * 1e3:.2f} / {b_close * 1e3:.2f} "
+            f"mc per deg/s (release / closed)  |  floor = return at {v_ret:.0f} deg/s + {margin:.2f}, "
+            f"cap {cap:.2f}")
+
+    def _save_friction(self, hdr, rows):
+        try:
+            os.makedirs(os.path.dirname(FRICTION_CSV), exist_ok=True)
+            with open(FRICTION_CSV, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["# travel_deg", "bins", "bin_w", "b_open", "b_close", "v_return", "margin", "floor_max"])
+                w.writerow(["#"] + [f"{v:g}" for v in hdr])
+                w.writerow(["d_from_release_deg", "friction_toward_release", "friction_toward_closed", "floor"])
+                for r in rows:
+                    w.writerow([f"{v:.4f}" for v in r])
+            self.log_local(f"Friction map saved to {FRICTION_CSV}")
+        except OSError as e:
+            self.log_local(f"Could not save the friction map: {e}")
 
     def add_tmt(self, t_host, d):
         if self.mode != "tmt":
@@ -972,7 +1094,7 @@ class HebConsole(QtWidgets.QMainWindow):
             self.slip.clear()
             self.t0 = None
             self.rate_times.clear()
-            name = {"tac": "TACTILE", "tmt": "TRIGGER MAP + TACTILE FORCE"}[mode]
+            name = {"tac": "TACTILE", "tmt": "TRIGGER MAP + TACTILE FORCE", "fid": "FRICTION ID"}[mode]
             self.mode_label.setText(f"Mode: {name}")
             self.mode_label.setStyleSheet("font-weight: bold; color: #2a9d3a;")
         else:
