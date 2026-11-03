@@ -500,6 +500,11 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
     {
         Dyn_Response_Packet resp = {};
         bool got = gripper->move_servo(id0_deg, id1_deg, rpm, rpm, &resp, 1000);
+        if (gripper->last_move_blocked()) {
+            // Guard already printed why; nothing was sent, torque untouched.
+            Serial.println("[MW] not moving (wrap guard).");
+            return;
+        }
         if (got && resp.response == DYN_ACK) {
             acked = true;
         } else if (!got) {
@@ -740,8 +745,12 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                     Serial.printf("clamped to range: ID0 %.1f..%.1f, ID1 %.1f..%.1f\n",
                                   DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
                                   DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
-                Dyn_Response_Packet resp;
+                Dyn_Response_Packet resp = {};
                 bool ok = gripper->move_servo(l_deg, r_deg, spd, spd, &resp);
+                if (gripper->last_move_blocked()) {
+                    Serial.println("move not sent (wrap guard)");
+                    return;
+                }
                 float lmA, rmA;
                 memcpy(&lmA, &resp.left_motor_current,  sizeof(lmA));
                 memcpy(&rmA, &resp.right_motor_current, sizeof(rmA));

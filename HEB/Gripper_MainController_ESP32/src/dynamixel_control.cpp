@@ -42,6 +42,7 @@ bool DynamixelController::send_command(const Dyn_Command_Packet& packet,
         _serial->read();
 
     _serial->write((const uint8_t*)&packet, sizeof(packet));
+    _last_tx_ms = millis();   // any command resets the Mega's heartbeat
 
     if (response == nullptr)
         return true;
@@ -103,12 +104,48 @@ Dyn_Response_Packet DynamixelController::read_response(bool* valid,
     return result;
 }
 
+bool DynamixelController::engage_check()
+{
+    // Torque is certainly still on if we moved recently and haven't sent
+    // STOP: the Mega's heartbeat hasn't expired, so no re-engage happens.
+    if (!_torque_maybe_off && (millis() - _last_tx_ms) < HEARTBEAT_SAFE_MS)
+        return true;
+
+    // Torque may come on with this move: check ID 0 is on the safe side of
+    // 0/360 first. Two tries, since read_position drops glitch samples.
+    float p0 = 0.0f, p1 = 0.0f;
+    bool  ok = read_position(&p0, &p1, 200) || read_position(&p0, &p1, 200);
+
+    const char* why = nullptr;
+    if (!ok)
+        why = "could not read servo positions";
+    else if (p0 < 0.0f || p0 > 100.0f)
+        why = "ID 0 is outside 0..100 deg (it would drive the long way into its open stop)";
+
+    if (why == nullptr)
+        return true;
+
+    // Rate-limit the warning: tm/hu call this every 15 ms while blocked.
+    if (millis() - _last_warn_ms > 1000UL) {
+        _last_warn_ms = millis();
+        if (ok)
+            Serial.printf("[DXL GUARD] move refused: %s. ID0 reads %.2f deg. "
+                          "Push the right finger toward closed so ID0 reads 0..90, then retry.\n",
+                          why, p0);
+        else
+            Serial.printf("[DXL GUARD] move refused: %s.\n", why);
+    }
+    return false;
+}
+
 bool DynamixelController::move_servo(float id0_deg, float id1_deg,
                                      float id0_speed, float id1_speed,
                                      Dyn_Response_Packet* response,
                                      unsigned long timeout_ms)
 {
     clamp_to_range(&id0_deg, &id1_deg);
+    if (!engage_check()) { _last_blocked = true; return false; }
+    _last_blocked = false;
 
     // Packet "left" = ID 0, "right" = ID 1 (see dynamixel_control.h).
     uint32_t left_deg_bits, right_deg_bits, left_spd_bits, right_spd_bits;
@@ -127,12 +164,16 @@ bool DynamixelController::move_servo(float id0_deg, float id1_deg,
         DYN_END_BYTE
     };
 
-    return send_command(packet, response, timeout_ms);
+    bool ok = send_command(packet, response, timeout_ms);
+    if (ok) _torque_maybe_off = false;
+    return ok;
 }
 
 void DynamixelController::move_servo_fast(float id0_deg, float id1_deg)
 {
     clamp_to_range(&id0_deg, &id1_deg);
+    if (!engage_check()) { _last_blocked = true; return; }
+    _last_blocked = false;
 
     uint32_t left_bits, right_bits, zero = 0;
     memcpy(&left_bits,  &id0_deg,  sizeof(left_bits));
@@ -149,6 +190,8 @@ void DynamixelController::move_servo_fast(float id0_deg, float id1_deg)
     };
 
     _serial->write((const uint8_t*)&packet, sizeof(packet));
+    _last_tx_ms       = millis();
+    _torque_maybe_off = false;
 }
 
 bool DynamixelController::move_servo_log(float id0_deg, float id1_deg,
@@ -156,6 +199,8 @@ bool DynamixelController::move_servo_log(float id0_deg, float id1_deg,
                                          unsigned long timeout_ms)
 {
     clamp_to_range(&id0_deg, &id1_deg);
+    if (!engage_check()) { _last_blocked = true; return false; }
+    _last_blocked = false;
 
     uint32_t left_bits, right_bits, zero = 0;
     memcpy(&left_bits,  &id0_deg,  sizeof(left_bits));
@@ -171,7 +216,9 @@ bool DynamixelController::move_servo_log(float id0_deg, float id1_deg,
         DYN_END_BYTE
     };
 
-    return send_command(packet, response, timeout_ms);
+    bool ok = send_command(packet, response, timeout_ms);
+    if (ok) _torque_maybe_off = false;
+    return ok;
 }
 
 bool DynamixelController::stop(Dyn_Response_Packet* response,
@@ -184,6 +231,7 @@ bool DynamixelController::stop(Dyn_Response_Packet* response,
         DYN_END_BYTE
     };
 
+    _torque_maybe_off = true;   // next move re-enables torque
     return send_command(packet, response, timeout_ms);
 }
 

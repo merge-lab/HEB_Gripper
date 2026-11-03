@@ -92,8 +92,26 @@ public:
     bool read_position(float* id0_deg, float* id1_deg,
                        unsigned long timeout_ms = 200);
 
+    // True if the most recent move_* call was refused by the wrap guard
+    // (see engage_check) rather than sent.
+    bool last_move_blocked() const { return _last_blocked; }
+
 private:
     HardwareSerial* _serial;
+
+    // ---- Wrap guard -------------------------------------------------------
+    // ID 0's range sits right next to 0/360. If it is below 0 (e.g. -10)
+    // when torque comes on, the servo treats it as ~350 and drives the long
+    // way (negative direction) into its open stop. The Mega turns torque on
+    // at the first move after a STOP or after its 500 ms heartbeat expires,
+    // so before any move that may re-enable torque, read positions and
+    // refuse unless ID 0 is within [0, 100] deg.
+    static constexpr unsigned long HEARTBEAT_SAFE_MS = 400;  // < Mega's 500
+    unsigned long _last_tx_ms       = 0;
+    bool          _torque_maybe_off = true;   // true at boot / after STOP
+    bool          _last_blocked     = false;
+    unsigned long _last_warn_ms     = 0;
+    bool engage_check();
 
     // Transmit a command packet and optionally wait for a response.
     bool send_command(const Dyn_Command_Packet& packet,
