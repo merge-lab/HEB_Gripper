@@ -50,6 +50,17 @@ QUICK_COMMANDS = [
     ("relax", "stop", "Relax the haptic motor"),
 ]
 
+# ESP32 lines that mean something went wrong; shown in the red alert banner.
+ALERT_PREFIXES = (
+    "[DXL GUARD]",          # gripper move rejected / servos relaxed
+    "[MW] aborted", "[MW] REJECTED", "[MW] move failed", "[MW] lost contact",
+    "move REJECTED",
+    "[TM] no ACK", "[TMT] no ACK", "[HU] no ACK",
+    "no ACK",
+    "gripper no PONG", "haptic no PONG",
+    "Calibration FAILED",
+)
+
 # Haptic trigger force: c (command units) x 3.18 = Newtons at the trigger.
 NEWTONS_PER_C = 3.18
 
@@ -351,6 +362,24 @@ class HebConsole(QtWidgets.QMainWindow):
         ctl.addWidget(self.record_btn)
         rl.addLayout(ctl)
 
+        # Alert banner: latest error line from the ESP32 (or the app).
+        self.alert_box = QtWidgets.QFrame()
+        self.alert_box.setStyleSheet("QFrame { background: #b3261e; border-radius: 4px; }"
+                                     "QLabel { color: white; font-weight: bold; }")
+        ab = QtWidgets.QHBoxLayout(self.alert_box)
+        ab.setContentsMargins(8, 4, 4, 4)
+        self.alert_label = QtWidgets.QLabel("")
+        self.alert_label.setWordWrap(True)
+        self.alert_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        dismiss = QtWidgets.QPushButton("Dismiss")
+        dismiss.clicked.connect(self.clear_alert)
+        ab.addWidget(self.alert_label, 1)
+        ab.addWidget(dismiss)
+        self.alert_box.hide()
+        self.alert_text = None
+        self.alert_count = 0
+        rl.addWidget(self.alert_box)
+
         # Panel visibility + tactile channel toggles + live values
         vis = QtWidgets.QHBoxLayout()
         vis.addWidget(QtWidgets.QLabel("Show:"))
@@ -507,6 +536,7 @@ class HebConsole(QtWidgets.QMainWindow):
 
     def on_serial_error(self, msg):
         self.log_local(f"Serial error: {msg} (board unplugged or reset?)")
+        self.show_alert(f"Serial error: {msg} (board unplugged or reset?)")
         self.disconnect_port()
 
     # ---- Sending --------------------------------------------------------------
@@ -549,6 +579,8 @@ class HebConsole(QtWidgets.QMainWindow):
             if line.startswith("TMT,pos"):
                 continue                     # column header, not useful in the console
             text_lines.append(line)
+            if line.startswith(ALERT_PREFIXES):
+                self.show_alert(line)
             if line.startswith("Tactile mode ON"):
                 self.set_mode("tac")
             elif line.startswith("Tactile mode OFF") or line.startswith("Trigger mapping OFF"):
@@ -596,6 +628,24 @@ class HebConsole(QtWidgets.QMainWindow):
 
     def log_local(self, msg):
         self.append_console([f"-- {msg}"])
+
+    def show_alert(self, text):
+        # Same message repeating (e.g. the guard at 1 Hz): count, don't spam.
+        if text == self.alert_text:
+            self.alert_count += 1
+        else:
+            self.alert_text = text
+            self.alert_count = 1
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        suffix = f"   (x{self.alert_count})" if self.alert_count > 1 else ""
+        self.alert_label.setText(f"{stamp}  {text}{suffix}")
+        self.alert_box.show()
+        QtWidgets.QApplication.beep()
+
+    def clear_alert(self):
+        self.alert_box.hide()
+        self.alert_text = None
+        self.alert_count = 0
 
     def set_mode(self, mode):
         if mode == self.mode:
