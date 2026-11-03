@@ -48,6 +48,14 @@ const float DXL_ID1_OPEN_DEG   = 179.0f;
 // settling/overshoot near an end (e.g. 0.8 deg for a 1 deg goal) is accepted.
 const float DXL_POSE_TOL_DEG   = 3.0f;
 
+// Streamed goals (move_servo_fast / move_servo_log) are shaped in the driver:
+// each servo's commanded position follows the requested one with at most
+// this speed and acceleration, never overshooting it. The shaper restarts
+// from the MEASURED pose every time torque (re)engages (mode start, after a
+// relax, after a heartbeat lapse), so the gripper never jumps to a stale goal.
+const float GRIPPER_MAX_DEG_PER_S  = 300.0f;    // ~servo top speed
+const float GRIPPER_MAX_DEG_PER_S2 = 6000.0f;   // ramp up/down
+
 // SAFETY: every servo motion must go through move_servo(), move_servo_fast()
 // or move_servo_log(). Those are the only places that enforce the range rule
 // above. Never write Dyn_Command_Packet bytes to the gripper serial port
@@ -113,10 +121,14 @@ public:
     bool last_move_blocked() const { return _last_blocked; }
 
     // For callers that read positions themselves while torque is on (e.g. a
-    // watched move): if the pose is out of range, relax the servos, print
-    // why, and return false. Glitch samples should be filtered by the caller
-    // (read_position already does).
+    // watched move): if the pose is out of range on two samples in a row,
+    // relax the servos, print why, and return false. (A single out-of-range
+    // sample is usually a bad read on the Mega and is ignored once.)
     bool check_pose_or_relax(float id0_deg, float id1_deg);
+
+    // Count of Mega replies that reported a problem (MALFORMED / FAILURE /
+    // unknown code) since boot. A rising count means the link is overloaded.
+    unsigned long bad_reply_count() const { return _bad_replies; }
 
     // Most recent valid position feedback (from any reply) and its age.
     // Returns false if none has been received yet.
@@ -128,23 +140,34 @@ public:
 private:
     HardwareSerial* _serial;
 
-    // ---- Range guard ------------------------------------------------------
-    // Pose is checked (via PING, which carries positions) before any move
-    // that may re-enable torque -- the Mega turns torque on at the first move
-    // after a STOP or after its 500 ms heartbeat expires -- and at least every
-    // POSE_CHECK_MS while moving. This also covers ID 0's 0/360 wrap: if it
-    // were below 0 (reads ~350) or a turn off (reads ~436), it is out of
-    // range and nothing moves.
-    static constexpr unsigned long HEARTBEAT_SAFE_MS = 400;  // < Mega's 500
-    static constexpr unsigned long POSE_CHECK_MS     = 100;
-    // While already moving, feedback is asynchronous: a PING is sent every
-    // POSE_CHECK_MS without waiting, and replies are picked up on later
-    // calls (poll_feedback). The control loop never blocks on the Mega.
-    // Each new sample is range-checked; if none arrives for POSE_STALE_MS
-    // the servos are relaxed. A request with no reply after
-    // POSE_REQ_TIMEOUT_MS is considered lost and re-sent.
-    static constexpr unsigned long POSE_STALE_MS       = 500;
-    static constexpr unsigned long POSE_REQ_TIMEOUT_MS = 100;
+    // ---- Link pacing --------------------------------------------------------
+    // The Mega is single-threaded and slow to answer: a reply needs servo bus
+    // reads, and each failed read blocks it for up to 100 ms. Bytes arriving
+    // from the ESP32 while it reads the servos can be lost (and can overflow
+    // its 64-byte input buffer). So:
+    //  * streamed moves go out at most every MOVE_MIN_INTERVAL_MS, and only
+    //    when the goal changed;
+    //  * position feedback is requested every POSE_CHECK_MS as a
+    //    MOVE_SERVO_LOG (a move whose reply carries positions only - half the
+    //    servo reads of a PING), and nothing else is sent until that reply
+    //    arrives or POSE_REQ_TIMEOUT_MS passes;
+    //  * replies are picked up without blocking (poll_feedback).
+    static constexpr unsigned long HEARTBEAT_SAFE_MS    = 400;   // < Mega's 500
+    static constexpr unsigned long POSE_CHECK_MS        = 100;
+    static constexpr unsigned long POSE_STALE_MS        = 500;   // no feedback -> relax
+    static constexpr unsigned long POSE_REQ_TIMEOUT_MS  = 150;   // > one Mega read timeout
+    static constexpr unsigned long MOVE_MIN_INTERVAL_MS = 10;    // <= 100 Hz
+    static constexpr float         MOVE_DEADBAND_DEG    = 0.05f;
+
+    unsigned long _last_tx_ms         = 0;
+    unsigned long _last_move_tx_ms    = 0;
+    unsigned long _last_pose_check_ms = 0;
+    bool          _torque_maybe_off   = true;   // true at boot / after STOP
+    bool          _last_blocked       = false;
+    unsigned long _last_warn_ms       = 0;
+    float         _sent0 = NAN, _sent1 = NAN;    // last streamed goal
+
+    // ---- Asynchronous feedback ----------------------------------------------
     uint8_t       _rx_buf[sizeof(Dyn_Response_Packet)];
     size_t        _rx_idx          = 0;
     bool          _req_outstanding = false;
@@ -153,15 +176,23 @@ private:
     float         _fb0 = 0.0f, _fb1 = 0.0f;
     unsigned long _fb_ms           = 0;
     unsigned long _fb_latency_ms   = 0;
+    unsigned long _bad_replies     = 0;
+    int           _bad_pose_streak = 0;
+
+    // ---- Goal shaper ----------------------------------------------------------
+    bool          _sm_ready = false;
+    float         _sm_pos[2] = { 0.0f, 0.0f };
+    float         _sm_vel[2] = { 0.0f, 0.0f };
+    unsigned long _sm_last_us = 0;
+
     void poll_feedback();
     void note_feedback(float p0, float p1);
-    unsigned long _last_tx_ms         = 0;
-    unsigned long _last_pose_check_ms = 0;
-    bool          _torque_maybe_off   = true;   // true at boot / after STOP
-    bool          _last_blocked       = false;
-    unsigned long _last_warn_ms       = 0;
-
-    bool pose_guard();                          // true = OK to send a move
+    // true = OK to send a move. *engaged = torque (re)engages with this move
+    // (strict check passed and the shaper was seeded from the measured pose).
+    bool pose_guard(bool* engaged);
+    void seed_shaper(float p0, float p1);
+    void shape_goals(float* id0_deg, float* id1_deg);
+    bool check_reply_pose(const Dyn_Response_Packet* r);
     void reject_and_relax(const char* why, bool have_pose, float p0, float p1);
 
     // Transmit a command packet and optionally wait for a response.

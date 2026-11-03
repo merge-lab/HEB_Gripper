@@ -114,54 +114,6 @@ struct TriggerMap
     }
 };
 
-// ---- Gripper goal speed limit -----------------------------------------------
-// Limits how fast each servo's commanded goal may change, and starts from
-// where the fingers actually are. Without it, entering a mapping mode with
-// the trigger released commands closed -> fully open in one step at full
-// servo speed, and the overshoot can carry ID 0 past 0 deg (it then reads
-// ~359, out of range, and the guard relaxes the gripper).
-static const float GRIPPER_MAX_DEG_PER_S = 180.0f;
-
-static float clamp_to(float v, float a, float b)
-{
-    float lo = a < b ? a : b, hi = a < b ? b : a;
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-struct GoalSlew
-{
-    bool  ready = false;
-    float g0 = 0.0f, g1 = 0.0f;
-    unsigned long last_us = 0;
-
-    // Seed from the present pose (clamped into the command range, so the
-    // first goals are always valid). If it can't be read, the first step
-    // seeds from the target instead.
-    void start(DynamixelController* gripper)
-    {
-        float p0, p1;
-        ready = false;
-        if (gripper && gripper->read_position(&p0, &p1, 200)) {
-            g0 = clamp_to(p0, DXL_ID0_CLOSED_DEG, DXL_ID0_OPEN_DEG);
-            g1 = clamp_to(p1, DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
-            ready = true;
-        }
-        last_us = micros();
-    }
-
-    void step(float* id0_deg, float* id1_deg)
-    {
-        unsigned long now = micros();
-        float max_step = GRIPPER_MAX_DEG_PER_S * ((now - last_us) / 1e6f);
-        last_us = now;
-        if (!ready) { g0 = *id0_deg; g1 = *id1_deg; ready = true; return; }
-        g0 += clamp_to(*id0_deg - g0, -max_step, max_step);
-        g1 += clamp_to(*id1_deg - g1, -max_step, max_step);
-        *id0_deg = g0;
-        *id1_deg = g1;
-    }
-};
-
 static TriggerMap make_trigger_map(HapticMotorController* motor, const char* label)
 {
     TriggerMap m;
@@ -195,8 +147,6 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     unsigned long lastInputMs = 0;
 
     TriggerMap trig = make_trigger_map(motor, tactile_force ? "Trigger mapping + tactile force" : "Trigger mapping");
-    GoalSlew slew;
-    slew.start(gripper);
 
     // tmt: the initial tare waits until the haptic motor and servos have been
     // running for a moment. Their current draw shifts the sensors' supply /
@@ -216,6 +166,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     unsigned long last_print_us = 0;
     unsigned long stats_start_ms = millis();
     unsigned long stats_loops = 0, stats_haptic_us = 0, stats_haptic_max_us = 0;
+    unsigned long stats_bad0 = gripper ? gripper->bad_reply_count() : 0;
     if (tactile_force)
     {
         Serial.println("[TMT] auto-tare in 0.5 s - keep the fingers unloaded.");
@@ -359,7 +310,6 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
         DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
-        slew.step(&id0_deg, &id1_deg);
         if (gripper)
             gripper->move_servo_fast(id0_deg, id1_deg);
 
@@ -387,14 +337,17 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         {
             unsigned long fb_age = 0;
             bool have_fb = gripper && gripper->latest_feedback(nullptr, nullptr, &fb_age);
+            unsigned long bad_now = gripper ? gripper->bad_reply_count() : 0;
             Serial.printf("[%s] loop %.0f Hz, haptic exchange avg %.2f ms / max %.2f ms, "
-                          "gripper feedback latency %lu ms, age %ld ms\n",
+                          "gripper feedback latency %lu ms, age %ld ms, mega bad replies %lu\n",
                           tactile_force ? "TMT" : "TM",
                           stats_loops * 1000.0f / stats_ms,
                           stats_haptic_us / 1000.0f / stats_loops,
                           stats_haptic_max_us / 1000.0f,
                           gripper ? gripper->feedback_latency_ms() : 0UL,
-                          have_fb ? (long)fb_age : -1L);
+                          have_fb ? (long)fb_age : -1L,
+                          bad_now - stats_bad0);
+            stats_bad0 = bad_now;
             stats_start_ms = millis();
             stats_loops = stats_haptic_us = stats_haptic_max_us = 0;
         }
@@ -422,8 +375,6 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
 void trigger_mapping_log(HapticMotorController* motor, DynamixelController* gripper)
 {
     TriggerMap trig = make_trigger_map(motor, "Trigger mapping (logged)");
-    GoalSlew slew;
-    slew.start(gripper);
 
     while (true)
     {
@@ -460,7 +411,6 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
         // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
         DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
-        slew.step(&id0_deg, &id1_deg);
         float actual_id0_deg = 0.0f, actual_id1_deg = 0.0f;
         if (gripper)
         {
@@ -494,7 +444,6 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
     float norm_slip  = 0.0f;
     bool  dxl_active = false;
     TriggerMap trig;
-    GoalSlew slew;
 
     Serial.println("HU mode: '<force> <slip>' to set (0-1), 'd' toggle DXL, 'e' exit.");
 
@@ -518,7 +467,6 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
                 if (dxl_active)
                 {
                     trig = make_trigger_map(motor, "HU gripper mapping");
-                    slew.start(gripper);
                 }
                 else
                 {
@@ -562,7 +510,6 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             float id0_deg, id1_deg;
 
             DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
-            slew.step(&id0_deg, &id1_deg);
             gripper->move_servo_fast(id0_deg, id1_deg);
 
             Serial.printf("[HU] f=%.2f s=%.2f pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
