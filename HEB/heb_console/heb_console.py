@@ -35,13 +35,14 @@ import pyqtgraph as pg
 # Settings
 # ---------------------------------------------------------------------------
 N_TAC = 6                      # T1..T6, matches tactile_sensors.h
-MAX_HISTORY_S = 300            # seconds of data kept for plotting
-MAX_RATE_HZ = 100              # sizing for the history buffers
+MAX_HISTORY_S = 120            # seconds of data kept for plotting
+MAX_RATE_HZ = 2000             # sizing for the history buffers ('tac 2000')
 DEFAULT_WINDOW_S = 10.0        # visible time window
 PLOT_REFRESH_MS = 33           # ~30 fps redraw
 CONSOLE_MAX_LINES = 5000
 QUICK_COMMANDS = [
-    ("tac", "tac", "Stream tactile only (100 Hz)"),
+    ("tac", "tac", "Stream tactile only (100 Hz, block-averaged)"),
+    ("tac 2k", "tac 2000", "Stream every tactile sample (2 kHz)"),
     ("tmt", "tmt", "Trigger -> gripper mapping with tactile-driven force"),
     ("Tare", "tare", "Re-zero the tactile sensors (keep them unloaded)"),
     ("Exit mode", "e", "Exit the current mode (tac, tmt, tm, gpos, ...)"),
@@ -218,20 +219,57 @@ class CommandLine(QtWidgets.QLineEdit):
 # Time-series store: one time base per stream, series appended together
 # ---------------------------------------------------------------------------
 class Stream:
-    def __init__(self, names):
-        maxlen = MAX_HISTORY_S * MAX_RATE_HZ
-        self.t = collections.deque(maxlen=maxlen)
-        self.series = {n: collections.deque(maxlen=maxlen) for n in names}
+    """Fixed-capacity numpy ring buffer: one time base plus named series.
+
+    Appends are O(1); the redraw copies only the visible window, so a 2 kHz
+    stream costs about the same to plot as a 100 Hz one."""
+
+    def __init__(self, names, capacity=MAX_HISTORY_S * MAX_RATE_HZ):
+        self.cap = capacity
+        self.names = list(names)
+        self.t = np.zeros(capacity)
+        self.data = {n: np.full(capacity, np.nan) for n in self.names}
+        self.n = 0                                  # total appended
+
+    def __len__(self):
+        return min(self.n, self.cap)
 
     def clear(self):
-        self.t.clear()
-        for d in self.series.values():
-            d.clear()
+        self.n = 0
 
     def append(self, t, values):
-        self.t.append(t)
-        for n, d in self.series.items():
-            d.append(values[n])
+        i = self.n % self.cap
+        self.t[i] = t
+        for name in self.names:
+            self.data[name][i] = values.get(name, np.nan)
+        self.n += 1
+
+    def last(self, name):
+        return self.data[name][(self.n - 1) % self.cap] if self.n else np.nan
+
+    def _time_at(self, j):
+        return self.t[j % self.cap]
+
+    def tail(self, seconds):
+        """(t, {name: y}) for samples within `seconds` of the newest, oldest first."""
+        size = len(self)
+        if size == 0:
+            return np.empty(0), {n: np.empty(0) for n in self.names}
+        lo, hi = self.n - size, self.n - 1          # absolute indices present
+        t_min = self._time_at(hi) - seconds
+        while lo < hi:                              # first index with time >= t_min
+            mid = (lo + hi) // 2
+            if self._time_at(mid) < t_min:
+                lo = mid + 1
+            else:
+                hi = mid
+        k = self.n - lo
+        start = lo % self.cap
+        def take(arr):
+            if start + k <= self.cap:
+                return arr[start:start + k]
+            return np.concatenate((arr[start:], arr[:start + k - self.cap]))
+        return take(self.t), {n: take(self.data[n]) for n in self.names}
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +288,7 @@ class HebConsole(QtWidgets.QMainWindow):
         self.tmt = Stream(TMT_STREAM)
         self.t0 = None
         self.new_data = False
-        self.rate_times = collections.deque(maxlen=MAX_RATE_HZ * 3)
+        self.rate_times = collections.deque(maxlen=MAX_RATE_HZ * 2)
         self.last_sample_time = 0.0
         self.mode = None                           # None, "tac", "tmt"
 
@@ -718,33 +756,26 @@ class HebConsole(QtWidgets.QMainWindow):
         win = self.window_box.value()
         t_end = None
         for stream in (self.tac, self.tmt):
-            if not stream.t:
-                for name in stream.series:
-                    if name in self.curves:
-                        self.curves[name].setData([], [])
-                continue
-            t = np.fromiter(stream.t, dtype=float, count=len(stream.t))
-            start = np.searchsorted(t, t[-1] - win)
-            t_end = t[-1] if t_end is None else max(t_end, t[-1])
-            for name, d in stream.series.items():
-                if name not in self.curves:      # e.g. 't' (trigger fraction): recorded, not plotted
-                    continue
-                y = np.fromiter(d, dtype=float, count=len(d))
-                self.curves[name].setData(t[start:], y[start:])
+            t, ys = stream.tail(win)
+            if len(t):
+                t_end = t[-1] if t_end is None else max(t_end, t[-1])
+            for name, y in ys.items():
+                if name in self.curves:          # e.g. 't' (trigger fraction): recorded, not plotted
+                    self.curves[name].setData(t, y)
 
         if t_end is not None:
             self.plots[PANELS[0][0]].setXRange(max(0.0, t_end - win), max(win, t_end), padding=0)
 
-        if self.tac.t:
-            latest = [self.tac.series[f"T{i + 1}"][-1] for i in range(N_TAC)]
+        if len(self.tac):
+            latest = [self.tac.last(f"T{i + 1}") for i in range(N_TAC)]
             for i, v in enumerate(latest):
                 self.value_labels[i].setText(f"{v:+.3f}")
             self.bars.setOpts(height=np.array(latest))
             lo, hi = min(-1.0, min(latest)), max(1.0, max(latest))
             self.bar_plot.setYRange(lo - 0.1, hi + 0.1, padding=0)
-        if self.tmt.t:
-            c = self.tmt.series['c'][-1]
-            applied = self.tmt.series['stm_cmd'][-1]
+        if len(self.tmt):
+            c = self.tmt.last('c')
+            applied = self.tmt.last('stm_cmd')
             txt = f"c = {c:.3f} ({c * NEWTONS_PER_C:.2f} N)"
             if applied == applied:   # not NaN (newer firmware)
                 txt += f"  applied {applied:.3f} ({applied * NEWTONS_PER_C:.2f} N)"
