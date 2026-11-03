@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""HEB Console - serial monitor + live tactile plots for the gripper ESP32.
+"""HEB Console - serial monitor + live plots for the gripper ESP32.
 
 Replaces the PlatformIO serial monitor for the demo: one window with
   * a serial console (ESP32 output, command box with history, quick buttons)
-  * live T1..T6 plots (time series + bar view) that light up automatically
-    when the ESP32 is in 'tac' mode, with a sample-rate readout and CSV
-    recording.
+  * live plots that light up automatically:
+      - 'tac' mode: tactile T1..T6 (tared), 100 Hz
+      - 'tmt' mode: tactile T1..T6, side sums, haptic force c, trigger
+        encoder position, and gripper ID0/ID1 commanded positions
+    with a sample-rate readout and CSV recording.
 
 Only one program can hold the serial port: close the PlatformIO monitor
 before connecting here.
@@ -32,19 +34,33 @@ import pyqtgraph as pg
 # Settings
 # ---------------------------------------------------------------------------
 N_TAC = 6                      # T1..T6, matches tactile_sensors.h
-SAMPLE_RATE_HZ = 100           # ESP32 'tac' mode rate
-MAX_HISTORY_S = 300            # seconds of tactile data kept for plotting
+MAX_HISTORY_S = 300            # seconds of data kept for plotting
+MAX_RATE_HZ = 100              # sizing for the history buffers
 DEFAULT_WINDOW_S = 10.0        # visible time window
 PLOT_REFRESH_MS = 33           # ~30 fps redraw
 CONSOLE_MAX_LINES = 5000
-Y_FIXED = (-1.2, 1.2)          # mapped range is -1..+1, a little headroom
 QUICK_COMMANDS = [
-    ("tac", "tac", "Start tactile streaming (100 Hz)"),
-    ("Exit mode", "e", "Exit the current mode (tac, tm, gpos, ...)"),
+    ("tac", "tac", "Stream tactile only (100 Hz)"),
+    ("tmt", "tmt", "Trigger -> gripper mapping with tactile-driven force"),
+    ("Tare", "tare", "Re-zero the tactile sensors (keep them unloaded)"),
+    ("Exit mode", "e", "Exit the current mode (tac, tmt, tm, gpos, ...)"),
     ("gpos", "gpos", "Torque off + stream servo positions"),
     ("gping", "gping", "Ping the gripper board"),
     ("gstop", "gstop", "Gripper torque off"),
     ("relax", "stop", "Relax the haptic motor"),
+]
+
+# Fields of a "TMT,..." line, in order (see trigger_mapping() in CLI_Control.cpp).
+TMT_FIELDS = ["pos", "t", "id0", "id1", "sumL", "sumR", "c"] + [f"T{i + 1}" for i in range(N_TAC)]
+CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
+
+# Plot panels: (key, title, [(series, label)], fixed y-range or None for auto)
+PANELS = [
+    ("tactile", "Tactile (tared)", [(f"T{i + 1}", f"T{i + 1}") for i in range(N_TAC)], None),
+    ("sums", "Side sums (clamped 0..3)", [("sumL", "Left T1+T2+T3"), ("sumR", "Right T4+T5+T6")], (-0.1, 3.2)),
+    ("force", "Haptic force c", [("c", "c")], (0.25, 1.05)),
+    ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
+    ("gripper", "Gripper commanded", [("id0", "ID0 (right)"), ("id1", "ID1 (left)")], (-5, 185)),
 ]
 
 
@@ -65,6 +81,19 @@ def parse_tactile(line):
         except ValueError:
             return None
     return vals
+
+
+def parse_tmt(line):
+    """'TMT,pos,t,id0,...' -> dict of floats, else None (also for the header)."""
+    if not line.startswith("TMT,"):
+        return None
+    parts = line.split(",")[1:]
+    if len(parts) != len(TMT_FIELDS):
+        return None
+    try:
+        return dict(zip(TMT_FIELDS, (float(p) for p in parts)))
+    except ValueError:
+        return None   # the column-header line
 
 
 # ---------------------------------------------------------------------------
@@ -138,25 +167,44 @@ class CommandLine(QtWidgets.QLineEdit):
 
 
 # ---------------------------------------------------------------------------
+# Time-series store: one time base per stream, series appended together
+# ---------------------------------------------------------------------------
+class Stream:
+    def __init__(self, names):
+        maxlen = MAX_HISTORY_S * MAX_RATE_HZ
+        self.t = collections.deque(maxlen=maxlen)
+        self.series = {n: collections.deque(maxlen=maxlen) for n in names}
+
+    def clear(self):
+        self.t.clear()
+        for d in self.series.values():
+            d.clear()
+
+    def append(self, t, values):
+        self.t.append(t)
+        for n, d in self.series.items():
+            d.append(values[n])
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class HebConsole(QtWidgets.QMainWindow):
     def __init__(self, port=None, baud=115200):
         super().__init__()
         self.setWindowTitle("HEB Console")
-        self.resize(1400, 820)
+        self.resize(1500, 950)
 
         self.ser = None
         self.reader = None
 
-        maxlen = MAX_HISTORY_S * SAMPLE_RATE_HZ
-        self.t = collections.deque(maxlen=maxlen)
-        self.y = [collections.deque(maxlen=maxlen) for _ in range(N_TAC)]
+        self.tac = Stream([f"T{i + 1}" for i in range(N_TAC)])
+        self.tmt = Stream(TMT_FIELDS[:7])          # pos, t, id0, id1, sumL, sumR, c
         self.t0 = None
         self.new_data = False
-        self.rate_times = collections.deque(maxlen=SAMPLE_RATE_HZ * 3)
+        self.rate_times = collections.deque(maxlen=MAX_RATE_HZ * 3)
         self.last_sample_time = 0.0
-        self.tac_mode = False
+        self.mode = None                           # None, "tac", "tmt"
 
         self.rec_file = None
         self.rec_writer = None
@@ -218,8 +266,8 @@ class HebConsole(QtWidgets.QMainWindow):
         ll.addWidget(self.console, 1)
 
         opts = QtWidgets.QHBoxLayout()
-        self.show_data_cb = QtWidgets.QCheckBox("Show T-lines in console")
-        self.show_data_cb.setToolTip("Tactile lines arrive at 100 Hz; hide them to keep the console readable")
+        self.show_data_cb = QtWidgets.QCheckBox("Show data lines in console")
+        self.show_data_cb.setToolTip("T-/TMT-lines arrive at up to 100 Hz; hide them to keep the console readable")
         self.autoscroll_cb = QtWidgets.QCheckBox("Autoscroll")
         self.autoscroll_cb.setChecked(True)
         clear = QtWidgets.QPushButton("Clear")
@@ -230,12 +278,14 @@ class HebConsole(QtWidgets.QMainWindow):
         opts.addWidget(clear)
         ll.addLayout(opts)
 
-        quick = QtWidgets.QHBoxLayout()
-        for label, cmd, tip in QUICK_COMMANDS:
+        quick = QtWidgets.QGridLayout()
+        for k, (label, cmd, tip) in enumerate(QUICK_COMMANDS):
             b = QtWidgets.QPushButton(label)
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, c=cmd: self.send(c))
-            quick.addWidget(b)
+            if cmd == "tare":
+                b.setStyleSheet("font-weight: bold;")
+            quick.addWidget(b, k // 4, k % 4)
         ll.addLayout(quick)
 
         cmd_row = QtWidgets.QHBoxLayout()
@@ -248,84 +298,115 @@ class HebConsole(QtWidgets.QMainWindow):
         ll.addLayout(cmd_row)
         split.addWidget(left)
 
-        # ---- Right: tactile plots
+        # ---- Right: plots
         right = QtWidgets.QWidget()
         rl = QtWidgets.QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
 
         ctl = QtWidgets.QHBoxLayout()
-        self.mode_label = QtWidgets.QLabel("Tactile: idle")
+        self.mode_label = QtWidgets.QLabel("Mode: idle")
         self.mode_label.setStyleSheet("font-weight: bold;")
         self.hz_label = QtWidgets.QLabel("-- Hz")
+        self.c_label = QtWidgets.QLabel("c = --")
+        self.c_label.setStyleSheet("font-weight: bold;")
         self.window_box = QtWidgets.QDoubleSpinBox()
         self.window_box.setRange(0.5, MAX_HISTORY_S)
         self.window_box.setValue(DEFAULT_WINDOW_S)
         self.window_box.setSuffix(" s")
         self.pause_btn = QtWidgets.QPushButton("Pause")
         self.pause_btn.setCheckable(True)
-        self.autoscale_cb = QtWidgets.QCheckBox("Auto Y")
         self.record_btn = QtWidgets.QPushButton("Record CSV")
         self.record_btn.setCheckable(True)
         self.record_btn.toggled.connect(self.toggle_record)
-        for w in (self.mode_label, self.hz_label):
+        for w in (self.mode_label, self.hz_label, self.c_label):
             ctl.addWidget(w)
             ctl.addSpacing(12)
         ctl.addStretch(1)
         ctl.addWidget(QtWidgets.QLabel("Window"))
         ctl.addWidget(self.window_box)
-        ctl.addWidget(self.autoscale_cb)
         ctl.addWidget(self.pause_btn)
         ctl.addWidget(self.record_btn)
         rl.addLayout(ctl)
 
-        self.chan_cbs = []
+        # Panel visibility + tactile channel toggles + live values
+        vis = QtWidgets.QHBoxLayout()
+        vis.addWidget(QtWidgets.QLabel("Show:"))
+        self.panel_cbs = {}
+        for key, title, _, _ in PANELS:
+            cb = QtWidgets.QCheckBox(title.split(" (")[0])
+            cb.setChecked(True)
+            cb.toggled.connect(lambda on, k=key: self.set_panel_visible(k, on))
+            self.panel_cbs[key] = cb
+            vis.addWidget(cb)
+        vis.addStretch(1)
+        rl.addLayout(vis)
+
+        self.colors = [pg.intColor(i, hues=N_TAC) for i in range(N_TAC)]
         chan_row = QtWidgets.QHBoxLayout()
         self.value_labels = []
-        colors = [pg.intColor(i, hues=N_TAC) for i in range(N_TAC)]
-        self.colors = colors
+        self.chan_cbs = []
         for i in range(N_TAC):
             cb = QtWidgets.QCheckBox(f"T{i + 1}")
             cb.setChecked(True)
-            cb.setStyleSheet(f"color: {colors[i].name()}; font-weight: bold;")
-            cb.toggled.connect(lambda on, k=i: self.curves[k].setVisible(on))
+            cb.setStyleSheet(f"color: {self.colors[i].name()}; font-weight: bold;")
+            cb.toggled.connect(lambda on, k=i: self.curves[f"T{k + 1}"].setVisible(on))
             self.chan_cbs.append(cb)
             val = QtWidgets.QLabel("  --  ")
             val.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
             self.value_labels.append(val)
             chan_row.addWidget(cb)
             chan_row.addWidget(val)
-            chan_row.addSpacing(8)
+            chan_row.addSpacing(6)
         chan_row.addStretch(1)
         rl.addLayout(chan_row)
 
-        self.ts_plot = pg.PlotWidget()
-        self.ts_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.ts_plot.setLabel("bottom", "Time", units="s")
-        self.ts_plot.setLabel("left", "Tactile (mapped)")
-        self.ts_plot.setYRange(*Y_FIXED)
-        self.curves = [
-            self.ts_plot.plot(pen=pg.mkPen(colors[i], width=2), name=f"T{i + 1}")
-            for i in range(N_TAC)
-        ]
-        for c in self.curves:
-            c.setClipToView(True)
-            c.setDownsampling(auto=True, method="peak")
-        rl.addWidget(self.ts_plot, 3)
+        # Stacked plots, x-axes linked
+        self.glw = pg.GraphicsLayoutWidget()
+        rl.addWidget(self.glw, 1)
+        self.plots = {}
+        self.curves = {}
+        extra_colors = ["#e76f51", "#2a9d8f", "#f4a261", "#264653"]
+        first = None
+        for row, (key, title, series, yr) in enumerate(PANELS):
+            p = self.glw.addPlot(row=row, col=0, title=title)
+            p.showGrid(x=True, y=True, alpha=0.3)
+            p.addLegend(offset=(5, 5))
+            if yr:
+                p.setYRange(*yr, padding=0)
+                p.enableAutoRange(axis="y", enable=False)
+            else:
+                p.enableAutoRange(axis="y", enable=True)
+            if first is None:
+                first = p
+            else:
+                p.setXLink(first)
+            for j, (name, label) in enumerate(series):
+                color = self.colors[int(name[1:]) - 1] if key == "tactile" else extra_colors[j % len(extra_colors)]
+                c = p.plot(pen=pg.mkPen(color, width=2), name=label)
+                c.setClipToView(True)
+                c.setDownsampling(auto=True, method="peak")
+                self.curves[name] = c
+            self.plots[key] = p
+        self.plots[PANELS[-1][0]].setLabel("bottom", "Time", units="s")
 
+        # Bar view of current tactile values
         self.bar_plot = pg.PlotWidget()
+        self.bar_plot.setMaximumHeight(140)
         self.bar_plot.showGrid(y=True, alpha=0.3)
         self.bar_plot.setLabel("left", "Now")
-        self.bar_plot.setYRange(*Y_FIXED)
         self.bar_plot.setXRange(0.4, N_TAC + 0.6)
         self.bar_plot.getAxis("bottom").setTicks([[(i + 1, f"T{i + 1}") for i in range(N_TAC)]])
         self.bar_plot.setMouseEnabled(x=False, y=False)
         self.bars = pg.BarGraphItem(x=np.arange(1, N_TAC + 1), height=np.zeros(N_TAC),
-                                    width=0.6, brushes=colors)
+                                    width=0.6, brushes=self.colors)
         self.bar_plot.addItem(self.bars)
-        rl.addWidget(self.bar_plot, 1)
+        rl.addWidget(self.bar_plot)
 
         split.addWidget(right)
-        split.setSizes([560, 840])
+        split.setSizes([560, 940])
+
+    def set_panel_visible(self, key, on):
+        self.plots[key].setVisible(on)
 
     # ---- Connection ---------------------------------------------------------
     def refresh_ports(self, select=None):
@@ -396,7 +477,7 @@ class HebConsole(QtWidgets.QMainWindow):
             self.ser = None
         self.connect_btn.setText("Connect")
         self.status.setText("Disconnected")
-        self.set_tac_mode(False)
+        self.set_mode(None)
 
     def on_serial_error(self, msg):
         self.log_local(f"Serial error: {msg} (board unplugged or reset?)")
@@ -427,36 +508,58 @@ class HebConsole(QtWidgets.QMainWindow):
         text_lines = []
         show_data = self.show_data_cb.isChecked()
         for t_host, line in items:
-            vals = parse_tactile(line)
-            if vals is None:
-                text_lines.append(line)
-                if line.startswith("Tactile mode ON"):
-                    self.set_tac_mode(True)
-                elif line.startswith("Tactile mode OFF"):
-                    self.set_tac_mode(False)
+            tmt = parse_tmt(line)
+            if tmt is not None:
+                self.add_tmt(t_host, tmt)
+                if show_data:
+                    text_lines.append(line)
                 continue
-            if show_data:
-                text_lines.append(line)
-            self.add_sample(t_host, vals)
+            vals = parse_tactile(line)
+            if vals is not None:
+                self.add_tac(t_host, vals)
+                if show_data:
+                    text_lines.append(line)
+                continue
+            if line.startswith("TMT,pos"):
+                continue                     # column header, not useful in the console
+            text_lines.append(line)
+            if line.startswith("Tactile mode ON"):
+                self.set_mode("tac")
+            elif line.startswith("Tactile mode OFF") or line.startswith("Trigger mapping OFF"):
+                self.set_mode(None)
         if text_lines:
             self.append_console(text_lines)
 
-    def add_sample(self, t_host, vals):
-        if not self.tac_mode:
-            # Data arriving means we're in tac mode even if we missed the banner
-            # (e.g. connected mid-stream).
-            self.set_tac_mode(True)
+    def _stamp(self, t_host):
         if self.t0 is None:
             self.t0 = t_host
-        self.t.append(t_host - self.t0)
-        for i in range(N_TAC):
-            self.y[i].append(vals[i])
         self.rate_times.append(t_host)
         self.last_sample_time = t_host
         self.new_data = True
+        return t_host - self.t0
+
+    def add_tac(self, t_host, vals):
+        if self.mode != "tac":
+            self.set_mode("tac")             # also catches connecting mid-stream
+        t = self._stamp(t_host)
+        self.tac.append(t, {f"T{i + 1}": vals[i] for i in range(N_TAC)})
         if self.rec_writer:
-            self.rec_writer.writerow([f"{t_host - self.rec_t0:.4f}"] + [f"{v:.3f}" for v in vals])
-            self.rec_count += 1
+            row = {f"T{i + 1}": vals[i] for i in range(N_TAC)}
+            self._record(t_host, "tac", row)
+
+    def add_tmt(self, t_host, d):
+        if self.mode != "tmt":
+            self.set_mode("tmt")
+        t = self._stamp(t_host)
+        self.tac.append(t, d)
+        self.tmt.append(t, d)
+        if self.rec_writer:
+            self._record(t_host, "tmt", d)
+
+    def _record(self, t_host, mode, row):
+        self.rec_writer.writerow([f"{t_host - self.rec_t0:.4f}", mode] +
+                                 [("%.4g" % row[f]) if f in row else "" for f in TMT_FIELDS])
+        self.rec_count += 1
 
     def append_console(self, lines):
         sb = self.console.verticalScrollBar()
@@ -468,23 +571,24 @@ class HebConsole(QtWidgets.QMainWindow):
     def log_local(self, msg):
         self.append_console([f"-- {msg}"])
 
-    def set_tac_mode(self, on):
-        if on == self.tac_mode:
+    def set_mode(self, mode):
+        if mode == self.mode:
             return
-        self.tac_mode = on
-        if on:
-            self.mode_label.setText("Tactile: STREAMING")
-            self.mode_label.setStyleSheet("font-weight: bold; color: #2a9d3a;")
-            # Start a fresh trace each time the mode starts.
-            self.t.clear()
-            for d in self.y:
-                d.clear()
+        self.mode = mode
+        if mode:
+            # Fresh traces each time a streaming mode starts.
+            self.tac.clear()
+            self.tmt.clear()
             self.t0 = None
             self.rate_times.clear()
+            name = {"tac": "TACTILE", "tmt": "TRIGGER MAP + TACTILE FORCE"}[mode]
+            self.mode_label.setText(f"Mode: {name}")
+            self.mode_label.setStyleSheet("font-weight: bold; color: #2a9d3a;")
         else:
-            self.mode_label.setText("Tactile: idle")
+            self.mode_label.setText("Mode: idle")
             self.mode_label.setStyleSheet("font-weight: bold;")
             self.hz_label.setText("-- Hz")
+            self.c_label.setText("c = --")
 
     # ---- Plotting -------------------------------------------------------------
     def redraw(self):
@@ -493,39 +597,51 @@ class HebConsole(QtWidgets.QMainWindow):
             span = self.rate_times[-1] - self.rate_times[0]
             if span > 0:
                 self.hz_label.setText(f"{(len(self.rate_times) - 1) / span:5.1f} Hz")
-        elif self.tac_mode and now - self.last_sample_time > 1.0:
+        elif self.mode and now - self.last_sample_time > 1.0:
             self.hz_label.setText("no data")
 
         if self.rec_writer:
             self.record_btn.setText(f"Stop ({self.rec_count})")
 
-        if not self.new_data or self.pause_btn.isChecked() or not self.t:
+        if not self.new_data or self.pause_btn.isChecked():
             return
         self.new_data = False
 
-        t = np.fromiter(self.t, dtype=float, count=len(self.t))
-        t_end = t[-1]
         win = self.window_box.value()
-        start = np.searchsorted(t, t_end - win)
-        tw = t[start:]
-        latest = []
-        for i in range(N_TAC):
-            yi = np.fromiter(self.y[i], dtype=float, count=len(self.y[i]))
-            self.curves[i].setData(tw, yi[start:])
-            latest.append(yi[-1])
-            self.value_labels[i].setText(f"{yi[-1]:+.3f}")
-        self.ts_plot.setXRange(max(0.0, t_end - win), max(win, t_end), padding=0)
-        if self.autoscale_cb.isChecked():
-            self.ts_plot.enableAutoRange(axis="y")
-        else:
-            self.ts_plot.setYRange(*Y_FIXED, padding=0)
-        self.bars.setOpts(height=np.array(latest))
+        t_end = None
+        for stream in (self.tac, self.tmt):
+            if not stream.t:
+                for name in stream.series:
+                    if name in self.curves:
+                        self.curves[name].setData([], [])
+                continue
+            t = np.fromiter(stream.t, dtype=float, count=len(stream.t))
+            start = np.searchsorted(t, t[-1] - win)
+            t_end = t[-1] if t_end is None else max(t_end, t[-1])
+            for name, d in stream.series.items():
+                if name not in self.curves:      # e.g. 't' (trigger fraction): recorded, not plotted
+                    continue
+                y = np.fromiter(d, dtype=float, count=len(d))
+                self.curves[name].setData(t[start:], y[start:])
+
+        if t_end is not None:
+            self.plots[PANELS[0][0]].setXRange(max(0.0, t_end - win), max(win, t_end), padding=0)
+
+        if self.tac.t:
+            latest = [self.tac.series[f"T{i + 1}"][-1] for i in range(N_TAC)]
+            for i, v in enumerate(latest):
+                self.value_labels[i].setText(f"{v:+.3f}")
+            self.bars.setOpts(height=np.array(latest))
+            lo, hi = min(-1.0, min(latest)), max(1.0, max(latest))
+            self.bar_plot.setYRange(lo - 0.1, hi + 0.1, padding=0)
+        if self.tmt.t:
+            self.c_label.setText(f"c = {self.tmt.series['c'][-1]:.3f}")
 
     # ---- Recording ------------------------------------------------------------
     def toggle_record(self, on):
         if on:
-            default = os.path.abspath(datetime.datetime.now().strftime("tactile_%Y%m%d_%H%M%S.csv"))
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Record tactile data", default, "CSV (*.csv)")
+            default = os.path.abspath(datetime.datetime.now().strftime("heb_%Y%m%d_%H%M%S.csv"))
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Record data", default, "CSV (*.csv)")
             if not path:
                 self.record_btn.setChecked(False)
                 return
@@ -536,7 +652,7 @@ class HebConsole(QtWidgets.QMainWindow):
                 self.record_btn.setChecked(False)
                 return
             self.rec_writer = csv.writer(self.rec_file)
-            self.rec_writer.writerow(["t_s"] + [f"T{i + 1}" for i in range(N_TAC)])
+            self.rec_writer.writerow(CSV_FIELDS)
             self.rec_count = 0
             self.rec_t0 = time.perf_counter()
             self.log_local(f"Recording to {path}")
