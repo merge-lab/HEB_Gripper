@@ -120,14 +120,31 @@ static void print_slip_line()
     Serial.printf("SLIP,%.3f,%.3f,%d\n", st.result.avgL, st.result.avgR, st.slip_since_last ? 1 : 0);
 }
 
-// Tactile -> haptic force (tmt mode). Each finger's three tared channels
-// are summed, clamped to 0..TAC_SUM_MAX, and the larger side sets the
-// constant-force magnitude linearly in TAC_FORCE_MIN..TAC_FORCE_MAX
-// (same units/sign convention as the CLI 'c' command).
-static const float TAC_SUM_MAX   = 3.0f;
-static const float TAC_FORCE_MIN = 0.2f;
-static const float TAC_FORCE_MAX = 1.2f;
+// Tactile -> haptic force (tmt mode). Each finger's three tared channels are
+// summed (clamped to 0..TAC_SUM_MAX) and the larger side, s, sets the
+// constant force c (same units and sign convention as the CLI 'c' command)
+// on a logarithmic curve, for finer resolution at light contact:
+//
+//     c(s) = TAC_FORCE_MIN + TAC_LOG_K * ln(1 + s / TAC_LOG_S0),
+//            clamped to TAC_FORCE_MIN..TAC_FORCE_MAX
+//
+// K and S0 are fitted so that s = 0.5 -> 2 N and s = 1 -> 3 N (N = 3.18 c):
+//     s    0     0.25  0.5   1.0   1.5   >=1.68
+//     c    0.25  0.45  0.63  0.94  1.21  1.30
+//     N    0.80  1.43  2.00  3.00  3.85  4.13
+static const float TAC_SUM_MAX     = 3.0f;
+static const float TAC_FORCE_MIN   = 0.25f;
+static const float TAC_FORCE_MAX   = 1.30f;
+static const float TAC_LOG_K       = 1.85f;
+static const float TAC_LOG_S0      = 2.2f;
 static const float TRIGGER_N_PER_C = 3.18f;   // c x 3.18 = Newtons at the trigger
+
+static float tactile_to_force(float s)
+{
+    if (!(s > 0.0f)) s = 0.0f;                    // also catches NaN
+    const float c = TAC_FORCE_MIN + TAC_LOG_K * logf(1.0f + s / TAC_LOG_S0);
+    return c > TAC_FORCE_MAX ? TAC_FORCE_MAX : c;
+}
 
 static float clamp_sum(float s)
 {
@@ -221,9 +238,11 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     if (tactile_force)
     {
         Serial.println("[TMT] auto-tare in 0.5 s - keep the fingers unloaded.");
-        Serial.printf("[TMT] c = %.2f..%.2f (%.2f..%.2f N) from max(T1+T2+T3, T4+T5+T6) over 0..%.0f.\n",
-                      TAC_FORCE_MIN, TAC_FORCE_MAX,
-                      TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C, TAC_SUM_MAX);
+        Serial.printf("[TMT] c = %.2f + %.2f ln(1 + s/%.1f), clamped %.2f..%.2f (%.2f..%.2f N); "
+                      "s = max(T1+T2+T3, T4+T5+T6): s 0.5 -> %.2f N, s 1 -> %.2f N.\n",
+                      TAC_FORCE_MIN, TAC_LOG_K, TAC_LOG_S0, TAC_FORCE_MIN, TAC_FORCE_MAX,
+                      TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C,
+                      tactile_to_force(0.5f) * TRIGGER_N_PER_C, tactile_to_force(1.0f) * TRIGGER_N_PER_C);
         Serial.println("TMT commands: tare, v <hz> <amp>, slip_thr <v>, slip_gate <v>, slip?, e to exit.");
         Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6,stm_cmd,iq");   // column header
     }
@@ -338,7 +357,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             sumL = clamp_sum(tac[0] + tac[1] + tac[2]);   // T1..T3: left finger (ID 1)
             sumR = clamp_sum(tac[3] + tac[4] + tac[5]);   // T4..T6: right finger (ID 0)
             float s = sumL > sumR ? sumL : sumR;
-            c_mag = TAC_FORCE_MIN + (TAC_FORCE_MAX - TAC_FORCE_MIN) * (s / TAC_SUM_MAX);
+            c_mag = tactile_to_force(s);
             if (!tmt_tared) c_mag = TAC_FORCE_MIN;   // stale baseline: don't trust it yet
             force = -c_mag;   // same sign convention as 'c'
         }

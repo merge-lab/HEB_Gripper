@@ -149,7 +149,7 @@ PANELS = [
      [("avgL", "avgL (left)"), ("avgR", "avgR (right)")], None),
     ("slipind", "Slip", [("slip", "slip")], (-0.1, 1.1)),
     ("force", "Haptic force (right axis: N = x 3.18)",
-     [("c", "c sent"), ("stm_cmd", "STM applied"), ("iq", "measured current")], (-0.05, 1.3)),
+     [("c", "c sent"), ("stm_cmd", "STM applied"), ("iq", "measured current")], (-0.05, 1.4)),
     ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
     ("gripper", "Gripper commanded", [("id1", "ID1 (left)"), ("id0", "ID0 (right)")], (-5, 185)),
 ]
