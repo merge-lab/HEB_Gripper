@@ -84,41 +84,69 @@ static float clamp_sum(float s)
     return s > TAC_SUM_MAX ? TAC_SUM_MAX : s;
 }
 
+// ---- Trigger encoder -> gripper opening -------------------------------------
+// t = 1: trigger released (encoder at the HIGH end, where the haptic force
+//        pushes it) -> gripper open
+// t = 0: trigger fully pulled (encoder lowered) -> gripper closed
+//
+// Calibrated ('cal'): uses the measured limits.
+// Uncalibrated: the released end is taken as the HIGHEST position seen so
+// far, with a fixed 47 deg of travel below it. Where the trigger happens to
+// sit while relaxed at startup varies, but once the force is on it is pushed
+// to the top, so tracking the maximum converges on the real released end.
+struct TriggerMap
+{
+    static constexpr float FALLBACK_RANGE_DEG = 47.0f;
+    bool  track_top = false;
+    float bottom = 0.0f, top = 0.0f;
+
+    float t(float pos)
+    {
+        if (track_top && pos > top) {
+            top    = pos;
+            bottom = top - FALLBACK_RANGE_DEG;
+        }
+        float span = top - bottom;
+        if (!(span > 0.0f)) return 1.0f;
+        float x = (pos - bottom) / span;
+        if (!(x > 0.0f)) return 0.0f;     // also NaN -> closed
+        return x > 1.0f ? 1.0f : x;
+    }
+};
+
+static TriggerMap make_trigger_map(HapticMotorController* motor, const char* label)
+{
+    TriggerMap m;
+    if (motor->is_calibrated()) {
+        m.bottom = motor->get_limit_close();
+        m.top    = motor->get_limit_open();
+        Serial.printf("%s ON (calibrated): released=%.2f pulled=%.2f. Type 'e' + Enter to exit.\n",
+                      label, m.top, m.bottom);
+    } else {
+        Response_Packet r;
+        while (!motor->relax(&r))
+            delay(200);
+        float pos;
+        memcpy(&pos, &r.encoder_value, sizeof(pos));
+        m.track_top = true;
+        m.top    = pos;
+        m.bottom = pos - TriggerMap::FALLBACK_RANGE_DEG;
+        Serial.printf("%s ON (uncalibrated): released end = highest position seen (now %.2f), "
+                      "47 deg travel. Run 'cal' for exact limits. Type 'e' + Enter to exit.\n",
+                      label, pos);
+    }
+    return m;
+}
+
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper, bool tactile_force)
 {
-    float POS_CLOSE, POS_OPEN;
     float force = -0.75f;
     String input;
     input.reserve(80);
     bool inputOverflow = false;
     unsigned long lastInputMs = 0;
 
-    if (motor->is_calibrated())
-    {
-        // Use measured mechanical limits; exact range replaces the hardcoded 47°.
-        POS_CLOSE = motor->get_limit_close();
-        float range = motor->get_limit_open() - motor->get_limit_close();
-        POS_OPEN  = POS_CLOSE - range;
-        Serial.printf("Trigger mapping ON (calibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
-                      POS_CLOSE, POS_OPEN);
-    }
-    else
-    {
-        // Fallback: read the encoder with the trigger at rest (released).
-        Response_Packet init_resp;
-        while (!motor->relax(&init_resp))
-            delay(200);
-        // The trigger rests at the HIGH end of its travel and pulling it
-        // lowers the encoder (same as the calibrated limits: rest = t 1 =
-        // gripper open, fully pulled = t 0 = closed). Place the 47 deg range
-        // below the rest reading so t = (pos - POS_CLOSE) / 47.
-        float rest_pos;
-        memcpy(&rest_pos, &init_resp.encoder_value, sizeof(rest_pos));
-        POS_CLOSE = rest_pos - 47.0f;
-        POS_OPEN  = POS_CLOSE - 47.0f;   // keeps the shared t formula below
-        Serial.printf("Trigger mapping ON (uncalibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
-                      POS_CLOSE, POS_OPEN);
-    }
+    TriggerMap trig = make_trigger_map(motor, tactile_force ? "Trigger mapping + tactile force" : "Trigger mapping");
 
     // tmt: the initial tare waits until the haptic motor and servos have been
     // running for a moment. Their current draw shifts the sensors' supply /
@@ -276,9 +304,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         float pos_deg;
         memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
 
-        float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
+        float t = trig.t(pos_deg);
 
         // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
@@ -339,32 +365,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
 // Used by response_plot.py to compare expected vs. actual position.
 void trigger_mapping_log(HapticMotorController* motor, DynamixelController* gripper)
 {
-    float POS_CLOSE, POS_OPEN;
-
-    if (motor->is_calibrated())
-    {
-        POS_CLOSE = motor->get_limit_close();
-        float range = motor->get_limit_open() - motor->get_limit_close();
-        POS_OPEN  = POS_CLOSE - range;
-        Serial.printf("Trigger mapping (logged) ON (calibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
-                      POS_CLOSE, POS_OPEN);
-    }
-    else
-    {
-        Response_Packet init_resp;
-        while (!motor->relax(&init_resp))
-            delay(200);
-        // The trigger rests at the HIGH end of its travel and pulling it
-        // lowers the encoder (same as the calibrated limits: rest = t 1 =
-        // gripper open, fully pulled = t 0 = closed). Place the 47 deg range
-        // below the rest reading so t = (pos - POS_CLOSE) / 47.
-        float rest_pos;
-        memcpy(&rest_pos, &init_resp.encoder_value, sizeof(rest_pos));
-        POS_CLOSE = rest_pos - 47.0f;
-        POS_OPEN  = POS_CLOSE - 47.0f;   // keeps the shared t formula below
-        Serial.printf("Trigger mapping (logged) ON (uncalibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
-                      POS_CLOSE, POS_OPEN);
-    }
+    TriggerMap trig = make_trigger_map(motor, "Trigger mapping (logged)");
 
     while (true)
     {
@@ -396,9 +397,7 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
         float pos_deg;
         memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
 
-        float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
+        float t = trig.t(pos_deg);
 
         // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
@@ -432,13 +431,10 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
 
 void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripper)
 {
-    const float TRIGGER_RANGE = 47.0f;
-
     float norm_force = 0.0f;
     float norm_slip  = 0.0f;
     bool  dxl_active = false;
-    float POS_CLOSE  = 0.0f;
-    float POS_OPEN   = 0.0f;
+    TriggerMap trig;
 
     Serial.println("HU mode: '<force> <slip>' to set (0-1), 'd' toggle DXL, 'e' exit.");
 
@@ -461,16 +457,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
                 dxl_active = !dxl_active;
                 if (dxl_active)
                 {
-                    Response_Packet cal_resp;
-                    while (!motor->relax(&cal_resp))
-                        delay(200);
-                    // Trigger rests at the high end; pulling lowers the encoder
-                    // (see trigger_mapping). Range sits below the rest reading.
-                    float rest_pos;
-                    memcpy(&rest_pos, &cal_resp.encoder_value, sizeof(rest_pos));
-                    POS_CLOSE = rest_pos - TRIGGER_RANGE;
-                    POS_OPEN  = POS_CLOSE - TRIGGER_RANGE;
-                    Serial.printf("DXL ON: close=%.2f open=%.2f\n", POS_CLOSE, POS_OPEN);
+                    trig = make_trigger_map(motor, "HU gripper mapping");
                 }
                 else
                 {
@@ -507,9 +494,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             float pos_deg;
             memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
 
-            float t = -(pos_deg - POS_CLOSE) / (POS_OPEN - POS_CLOSE);
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
+            float t = trig.t(pos_deg);
 
             // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
 
