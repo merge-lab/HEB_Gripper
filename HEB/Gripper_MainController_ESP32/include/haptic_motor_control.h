@@ -111,6 +111,12 @@ public:
     // Called automatically by calibrate_trigger() on success.
     bool send_limits();
 
+    // The STM32's limit gate fades the force out near the release end once
+    // limits are set. enabled=false sends a release limit that can never be
+    // reached (no fade anywhere), e.g. while measuring friction; true restores
+    // the calibrated limits (or keeps it off if not calibrated).
+    bool set_limit_gate(bool enabled);
+
     bool  is_calibrated()   const { return calibrated; }
     float get_limit_open()  const { return LIMIT_OPEN; }
     float get_limit_close() const { return LIMIT_CLOSE; }

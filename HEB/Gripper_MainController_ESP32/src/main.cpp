@@ -4,6 +4,7 @@
 #include "CLI_Control.h"
 #include "tactile_sensors.h"
 #include "slip_detector.h"
+#include "trigger_control.h"
 
 // I2C temp sensor (CJMCU-9808) monitoring the haptic motor - disabled for now.
 // Wiring when re-enabled: ESP32 SCL=14 -> sensor SCL, ESP32 SDA=13 -> sensor SDA,
@@ -32,6 +33,7 @@ void setup() {
   delay(500);
 
   CLI_Setup(&motor, &gripper);
+  trigger_control_begin();                     // load the trigger friction map from flash
 }
 
 void loop()

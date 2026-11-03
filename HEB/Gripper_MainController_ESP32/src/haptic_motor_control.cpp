@@ -265,6 +265,23 @@ bool HapticMotorController::calibrate_trigger(float cal_force)
     return true;
 }
 
+bool HapticMotorController::set_limit_gate(bool enabled)
+{
+    if (enabled && calibrated)
+        return send_limits();
+    // Release limit far beyond any reachable position: never "at limit", and
+    // never inside the fade zone.
+    const float far = 1.0e9f, zero = 0.0f, ramp = 1.0f, k = 3.0f;
+    uint32_t p1, p2, p3, p4, p5;
+    memcpy(&p1, &far,  4);
+    memcpy(&p2, &zero, 4);
+    memcpy(&p3, &zero, 4);
+    memcpy(&p4, &ramp, 4);
+    memcpy(&p5, &k,    4);
+    Command_Packet pkt = { START_BYTE, SET_LIMITS, p1, p2, p3, p4, p5, 0, END_BYTE };
+    return send_command(pkt, nullptr);
+}
+
 bool HapticMotorController::send_limits()
 {
     uint32_t p1, p2, p3, p4, p5;

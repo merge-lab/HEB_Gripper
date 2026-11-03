@@ -1,6 +1,7 @@
 #include "CLI_Control.h"
 #include "tactile_sensors.h"
 #include "slip_detector.h"
+#include "trigger_control.h"
 #include <esp_timer.h>
 #include <math.h>
 
@@ -228,6 +229,15 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     // of a fixed delay; the haptic UART exchange (~4.5 ms at 115200 baud)
     // is the floor. Printing is rate-limited so output doesn't scale with
     // the loop rate, and timing stats are reported once per second.
+    // Smooth start, friction floor and return-speed limit (trigger_control.h).
+    // The force is decided before each exchange, so they use the previous
+    // reply's position and speed (one loop, ~5 ms, old).
+    const FrictionMap& fmap = trigger_friction_map();
+    const bool use_floor = tactile_force && fmap.valid;
+    const unsigned long soft_start_ms = millis();
+    float last_pos = NAN, trig_vel = 0.0f;          // trig_vel > 0 = toward release
+    unsigned long last_pos_us = 0;
+
     const unsigned long LOOP_PERIOD_US  = 5000;                       // 200 Hz target
     const unsigned long PRINT_PERIOD_US = tactile_force ? 10000 : 50000; // TMT 100 Hz, TM 20 Hz
     unsigned long next_loop_us  = micros();
@@ -243,6 +253,12 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                       TAC_FORCE_MIN, TAC_LOG_K, TAC_LOG_S0, TAC_FORCE_MIN, TAC_FORCE_MAX,
                       TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C,
                       tactile_to_force(0.5f) * TRIGGER_N_PER_C, tactile_to_force(1.0f) * TRIGGER_N_PER_C);
+        if (trigger_friction_map().valid)
+            Serial.printf("[TMT] friction floor ON: return at >= %.0f deg/s everywhere (map: %.1f deg travel, "
+                          "floor <= %.2f).\n", TRIGGER_RETURN_DEG_S, trigger_friction_map().travel,
+                          FrictionMap::FLOOR_MAX);
+        else
+            Serial.println("[TMT] friction floor OFF: no friction map - run 'fid' once (hands off the trigger).");
         Serial.println("TMT commands: tare, v <hz> <amp>, slip_thr <v>, slip_gate <v>, slip?, e to exit.");
         Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6,stm_cmd,iq");   // column header
     }
@@ -359,14 +375,29 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             float s = sumL > sumR ? sumL : sumR;
             c_mag = tactile_to_force(s);
             if (!tmt_tared) c_mag = TAC_FORCE_MIN;   // stale baseline: don't trust it yet
+
+            if (use_floor && !isnan(last_pos)) {
+                // Never below what it takes to return the trigger from here.
+                const float floor = fmap.floor_at(trig.top - last_pos,
+                                                  TRIGGER_RETURN_DEG_S, TRIGGER_FLOOR_MARGIN);
+                if (c_mag < floor) c_mag = floor;
+                // Snapping back too fast: ease off the push (never below 0).
+                if (trig_vel > TRIGGER_MAX_RETURN_DEG_S) {
+                    c_mag -= 0.5f * fmap.b_open * (trig_vel - TRIGGER_MAX_RETURN_DEG_S);
+                    if (c_mag < 0.0f) c_mag = 0.0f;
+                }
+            }
             force = -c_mag;   // same sign convention as 'c'
         }
 
         // Keep the selected base force and heartbeat active; the STM32 retains
         // the vibration overlay and handles limit gating and ramp at 1 kHz.
+        // Smooth start (tm and tmt): fade the force in when the mode begins.
+        const float force_cmd = force * trigger_soft_start_gain(millis() - soft_start_ms);
+
         Response_Packet resp;
         unsigned long haptic_t0 = micros();
-        bool ok = motor->set_constant_force(force, &resp);
+        bool ok = motor->set_constant_force(force_cmd, &resp);
         unsigned long haptic_us = micros() - haptic_t0;
 
         if (!ok)
@@ -378,6 +409,13 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
 
         float pos_deg;
         memcpy(&pos_deg, &resp.encoder_value, sizeof(pos_deg));
+        {
+            const unsigned long now_pos_us = micros();
+            if (!isnan(last_pos) && now_pos_us != last_pos_us)
+                trig_vel += 0.3f * ((pos_deg - last_pos) / ((now_pos_us - last_pos_us) * 1e-6f) - trig_vel);
+            last_pos = pos_deg;
+            last_pos_us = now_pos_us;
+        }
 
         float t = trig.t(pos_deg);
 
@@ -403,7 +441,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             memcpy(&stm_cmd, &resp.motor_value,     sizeof(stm_cmd));
             memcpy(&iq,      &resp.measured_torque, sizeof(iq));
             Serial.printf("TMT,%.2f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-                          pos_deg, t, id0_deg, id1_deg, sumL, sumR, c_mag,
+                          pos_deg, t, id0_deg, id1_deg, sumL, sumR, -force_cmd,
                           tac[0], tac[1], tac[2], tac[3], tac[4], tac[5],
                           -stm_cmd, -iq);
             print_slip_line();
@@ -873,6 +911,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     Serial.println("Gripper: m <id0> <id1> [rpm]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac [hz] (tactile stream, 100 default, 2000 max)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Slip:    slip_thr <v>   slip_gate <v>   slip?   (FORTE detector, on-board at 2 kHz)");
+    Serial.println("Trigger: fid (measure friction, hands off)   fid? (print map)   fid_clear");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -927,6 +966,16 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (handle_slip_command(line)) {
             // slip_thr / slip_gate / slip? handled
+        }
+        else if (line.equalsIgnoreCase("fid")) {
+            trigger_friction_id(motor, gripper);
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("fid?")) {
+            trigger_friction_print();
+        }
+        else if (line.equalsIgnoreCase("fid_clear")) {
+            trigger_friction_clear();
         }
         else if (line.equalsIgnoreCase("tac") || line.startsWith("tac ") || line.startsWith("TAC ")) {
             // tac [hz]: 100 Hz default; 'tac 2000' streams every sample.

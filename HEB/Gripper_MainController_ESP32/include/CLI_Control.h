@@ -88,6 +88,12 @@ Tactile / slip (FORTE detector runs on-board at 2 kHz, see slip_core.h):
   slip_thr <v>       slip threshold (FORTE slip_var_threshold, default 2)
   slip_gate <v>      contact gate (both fingers must reach it, default 0.6)
   slip?              print SLIPCFG,<thr>,<gate> and detector load
+
+Trigger friction (trigger_control.h / trigger_friction.h):
+  fid                measure friction along the travel (hands off, ~20-30 s);
+                     saved to flash; tmt then keeps its force above it
+  fid?               print the stored map (FRICMAP / FRICBIN / FRICEND)
+  fid_clear          forget the stored map
 */
 void CLI(HapticMotorController* motor, DynamixelController* gripper = nullptr);
 
