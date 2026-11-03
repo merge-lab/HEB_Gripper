@@ -69,7 +69,21 @@ void force_ramp_up(HapticMotorController* motor) {
   Serial.println("RAMP UP complete - relaxed");
 }
 
-void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
+// Tactile -> haptic force (tmt mode). Each finger's three tared channels
+// are summed, clamped to 0..TAC_SUM_MAX, and the larger side sets the
+// constant-force magnitude linearly in TAC_FORCE_MIN..TAC_FORCE_MAX
+// (same units/sign convention as the CLI 'c' command).
+static const float TAC_SUM_MAX   = 3.0f;
+static const float TAC_FORCE_MIN = 0.3f;
+static const float TAC_FORCE_MAX = 1.0f;
+
+static float clamp_sum(float s)
+{
+    if (!(s > 0.0f)) return 0.0f;      // also catches NaN
+    return s > TAC_SUM_MAX ? TAC_SUM_MAX : s;
+}
+
+void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper, bool tactile_force)
 {
     float POS_CLOSE, POS_OPEN;
     float force = -0.75f;
@@ -99,7 +113,17 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
                       POS_CLOSE, POS_OPEN);
     }
 
-    Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
+    if (tactile_force)
+    {
+        if (tactile_tare())
+            Serial.println("[TMT] tactile tared (keep fingers unloaded at start).");
+        Serial.printf("[TMT] c = %.2f..%.2f from max(T1+T2+T3, T4+T5+T6) over 0..%.0f.\n",
+                      TAC_FORCE_MIN, TAC_FORCE_MAX, TAC_SUM_MAX);
+        Serial.println("TMT commands: tare, v <hz> <amp>, e to exit.");
+        Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6");   // column header
+    }
+    else
+        Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
 
     while (true)
     {
@@ -151,10 +175,19 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
                 Serial.println("Trigger mapping OFF.");
                 return;
             }
+            if (line.equalsIgnoreCase("tare"))
+            {
+                Serial.println(tactile_tare() ? "[TM] tactile tared." : "[TM] tare failed (no samples yet).");
+                continue;
+            }
 
             String arg = line.substring(1);
             char extra;
-            if (line.charAt(0) == 'c' || line.charAt(0) == 'C')
+            if ((line.charAt(0) == 'c' || line.charAt(0) == 'C') && tactile_force)
+            {
+                Serial.println("[TMT] force follows the tactile sensors in this mode; use 'tm' for manual c.");
+            }
+            else if (line.charAt(0) == 'c' || line.charAt(0) == 'C')
             {
                 float requestedForce;
                 if (sscanf(arg.c_str(), " %f %c", &requestedForce, &extra) == 1 &&
@@ -178,7 +211,21 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
                     Serial.println("[TM] usage: v <hz 0..400> <amp >= 0>");
             }
             else
-                Serial.println("[TM] commands: c <force>, v <hz> <amp>, e");
+                Serial.println(tactile_force ? "[TMT] commands: tare, v <hz> <amp>, e"
+                                             : "[TM] commands: c <force>, v <hz> <amp>, tare, e");
+        }
+
+        // tmt: force from the newest tactile sample (shared buffer, no ADC wait).
+        float tac[TACTILE_COUNT];
+        float sumL = 0.0f, sumR = 0.0f, c_mag = 0.0f;
+        if (tactile_force)
+        {
+            tactile_latest(tac, true);
+            sumL = clamp_sum(tac[0] + tac[1] + tac[2]);   // T1..T3: left finger (ID 1)
+            sumR = clamp_sum(tac[3] + tac[4] + tac[5]);   // T4..T6: right finger (ID 0)
+            float s = sumL > sumR ? sumL : sumR;
+            c_mag = TAC_FORCE_MIN + (TAC_FORCE_MAX - TAC_FORCE_MIN) * (s / TAC_SUM_MAX);
+            force = -c_mag;   // same sign convention as 'c'
         }
 
         // Keep the selected base force and heartbeat active; the STM32 retains
@@ -206,8 +253,14 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper)
         if (gripper)
             gripper->move_servo_fast(id0_deg, id1_deg);
 
-        Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
-                      pos_deg, t, id0_deg, id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+        if (tactile_force)
+            // Machine-readable line for heb_console (see header line above).
+            Serial.printf("TMT,%.2f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                          pos_deg, t, id0_deg, id1_deg, sumL, sumR, c_mag,
+                          tac[0], tac[1], tac[2], tac[3], tac[4], tac[5]);
+        else
+            Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
+                          pos_deg, t, id0_deg, id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
 
         delay(15);
     }
@@ -602,8 +655,8 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
     if (gripper) gripper->stop(nullptr);
 
     const unsigned long PERIOD_US = 10000;   // 100 Hz
-    Serial.println("Tactile mode ON: T1..T6 at 100 Hz (-1..+1). Haptic relaxed, gripper torque off.");
-    Serial.println("Type 'e' + Enter to exit.");
+    Serial.println("Tactile mode ON: T1..T6 (tared) at 100 Hz. Haptic relaxed, gripper torque off.");
+    Serial.println("'tare' re-zeroes the sensors, 'e' + Enter exits.");
 
     char  cmd[16];
     int   cmd_len   = 0;
@@ -618,6 +671,9 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
             char c = (char)Serial.read();
             if (c == '\n' || c == '\r') {
                 cmd[cmd_len] = '\0';
+                if (cmd_len == 4 && strncasecmp(cmd, "tare", 4) == 0) {
+                    Serial.println(tactile_tare() ? "Tactile tared." : "Tare failed (no samples yet).");
+                }
                 if (cmd_len == 1 && (cmd[0] == 'e' || cmd[0] == 'E')) {
                     Serial.printf("Tactile mode OFF. %lu samples, %lu late (>10 ms) cycles.\n",
                                   samples, overruns);
@@ -643,7 +699,7 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
         }
         next_us += PERIOD_US;
 
-        tactile_read(mapped);
+        tactile_latest(mapped, true);   // newest sample from the 1 kHz buffer, tared
         samples++;
         Serial.printf("T1:%.3f,T2:%.3f,T3:%.3f,T4:%.3f,T5:%.3f,T6:%.3f\n",
                       mapped[0], mapped[1], mapped[2], mapped[3], mapped[4], mapped[5]);
@@ -680,7 +736,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <id0> <id1> [spd]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
-    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac (tactile stream)   hu (haptic update)   cal (calibrate)   sl (send limits)");
+    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac (tactile stream)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -725,6 +781,13 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         else if (line.equalsIgnoreCase("tml")) {
             trigger_mapping_log(motor, gripper);
             relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("tmt")) {
+            trigger_mapping(motor, gripper, true);
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("tare")) {
+            Serial.println(tactile_tare() ? "Tactile tared." : "Tare failed (no samples yet).");
         }
         else if (line.equalsIgnoreCase("tac")) {
             tactile_mode(motor, gripper);

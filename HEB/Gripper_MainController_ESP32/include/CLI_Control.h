@@ -23,7 +23,13 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper = null
 // While mapping: 'c <force>' changes force, 'v <hz> <amp>' overlays vibration
 // (0 Hz or amplitude 0 disables it). Type 'e' + Enter to relax and exit.
 // Accepts CR/LF line endings, or processes input after the Serial idle timeout.
-void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper);
+// tactile_force = true is 'tmt' mode: same position mapping, but the
+// constant force follows the tactile sensors every loop: tared sums
+// T1+T2+T3 (left finger) and T4+T5+T6 (right finger), each clamped to 0..3;
+// the larger maps linearly to c = 0.3..1.0. Prints machine-readable
+// "TMT,..." lines for heb_console. 'tare' re-zeroes the sensors.
+void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
+                     bool tactile_force = false);
 
 // Same as trigger_mapping(), but reads back and logs actual servo position
 // each cycle (slower). Pairs with response_plot.py for expected-vs-actual
