@@ -5,9 +5,13 @@ Replaces the PlatformIO serial monitor for the demo: one window with
   * a serial console (ESP32 output, command box with history, quick buttons)
   * live plots that light up automatically:
       - 'tac' mode: tactile T1..T6 (tared), 100 Hz
-      - 'tmt' mode: tactile T1..T6, side sums, haptic force c, trigger
-        encoder position, and gripper ID0/ID1 commanded positions
+      - 'tmt' mode: tactile T1..T6, haptic force c, trigger encoder
+        position, and gripper ID0/ID1 commanded positions
+      - both modes: the ESP32's on-board FORTE slip detector (avgL/avgR and
+        the slip indicator)
     with a sample-rate readout and CSV recording.
+  * slip-detector settings (threshold, contact gate) that are saved between
+    runs and sent to the ESP32 on connect, on change, and after it reboots.
 
 Only one program can hold the serial port: close the PlatformIO monitor
 before connecting here.
@@ -19,6 +23,7 @@ import argparse
 import collections
 import csv
 import datetime
+import json
 import os
 import re
 import sys
@@ -66,7 +71,62 @@ ALERT_PREFIXES = (
 # Once-per-second timing line from tm/tmt (see trigger_mapping()).
 STATS_RE = re.compile(
     r"^\[(?:TMT|TM)\] loop (?P<hz>\d+) Hz, haptic exchange avg (?P<hap>[\d.]+) ms / max (?P<hapmax>[\d.]+) ms, "
-    r"gripper feedback latency (?P<lat>\d+) ms, age (?P<age>-?\d+) ms(?:, mega bad replies (?P<bad>\d+))?")
+    r"gripper feedback latency (?P<lat>\d+) ms, age (?P<age>-?\d+) ms(?:, mega bad replies (?P<bad>\d+))?"
+    r"(?:, slip (?P<slip_rate>[\d.]+)/s (?P<slip_us>[\d.]+) us core0 (?P<slip_cpu>[\d.]+)%)?")
+
+# Settings kept between runs. Slip defaults are FORTE's (slip_var_threshold = 2,
+# single-finger contact gate = 0.6).
+SETTINGS_PATH = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                             "heb_console", "settings.json")
+DEFAULT_SETTINGS = {"slip_threshold": 2.0, "slip_contact_gate": 0.6}
+
+
+def load_settings():
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_PATH) as f:
+            saved = json.load(f)
+        for key, default in DEFAULT_SETTINGS.items():
+            if isinstance(saved.get(key), (int, float)):
+                settings[key] = float(saved[key])
+    except (OSError, ValueError):
+        pass                                     # first run or unreadable: defaults
+    return settings
+
+
+def save_settings(settings):
+    os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+    tmp = SETTINGS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(tmp, SETTINGS_PATH)               # atomic: never a half-written file
+
+
+# "SLIP,<avgL>,<avgR>,<slip>" (100 Hz in tac/tmt) and "SLIPCFG,<thr>,<gate>"
+# (the ESP32's confirmation of the active thresholds).
+SLIP_FIELDS = ["avgL", "avgR", "slip"]
+
+
+def parse_slip(line):
+    if not line.startswith("SLIP,"):
+        return None
+    parts = line.split(",")[1:]
+    if len(parts) != 3:
+        return None
+    try:
+        return dict(zip(SLIP_FIELDS, (float(p) for p in parts)))
+    except ValueError:
+        return None
+
+
+def parse_slipcfg(line):
+    if not line.startswith("SLIPCFG,"):
+        return None
+    try:
+        thr, gate = (float(p) for p in line.split(",")[1:3])
+        return thr, gate
+    except ValueError:
+        return None
 
 # Haptic trigger force: c (command units) x 3.18 = Newtons at the trigger.
 NEWTONS_PER_C = 3.18
@@ -76,11 +136,14 @@ TMT_FIELDS = (["pos", "t", "id0", "id1", "sumL", "sumR", "c"] + [f"T{i + 1}" for
               + ["stm_cmd", "iq"])     # STM32-applied force and measured current (newer firmware)
 TMT_FIELDS_OLD = len(TMT_FIELDS) - 2   # older firmware lines lack the last two
 TMT_STREAM = ["pos", "t", "id0", "id1", "sumL", "sumR", "c", "stm_cmd", "iq"]
-CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
+CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS + SLIP_FIELDS
 
 # Plot panels: (key, title, [(series, label)], fixed y-range or None for auto)
 PANELS = [
     ("tactile", "Tactile (tared)", [(f"T{i + 1}", f"T{i + 1}") for i in range(N_TAC)], None),
+    ("slip", "Slip detector (FORTE, on ESP32): avgL / avgR",
+     [("avgL", "avgL (left)"), ("avgR", "avgR (right)")], None),
+    ("slipind", "Slip", [("slip", "slip")], (-0.1, 1.1)),
     ("force", "Haptic force (right axis: N = x 3.18)",
      [("c", "c sent"), ("stm_cmd", "STM applied"), ("iq", "measured current")], (-0.05, 1.3)),
     ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
@@ -101,6 +164,9 @@ SERIES_COLORS = {
     "stm_cmd": "#e9c46a",
     "iq": "#c77dff",
     "pos": "#d9d9d9",
+    "avgL": LEFT_COLORS[1],
+    "avgR": RIGHT_COLORS[1],
+    "slip": "#e63946",
 }
 
 
@@ -286,6 +352,11 @@ class HebConsole(QtWidgets.QMainWindow):
 
         self.tac = Stream([f"T{i + 1}" for i in range(N_TAC)])
         self.tmt = Stream(TMT_STREAM)
+        self.slip = Stream(SLIP_FIELDS)
+        self.settings = load_settings()
+        self.last_slip_time = -1e9
+        self.slip_events = 0
+        self.prev_slip = 0
         self.t0 = None
         self.new_data = False
         self.rate_times = collections.deque(maxlen=MAX_RATE_HZ * 2)
@@ -416,6 +487,44 @@ class HebConsole(QtWidgets.QMainWindow):
         ctl.addWidget(self.record_btn)
         rl.addLayout(ctl)
 
+        # Slip detector settings (saved between runs, pushed to the ESP32).
+        slip_row = QtWidgets.QHBoxLayout()
+        self.slip_thr_box = QtWidgets.QDoubleSpinBox()
+        self.slip_gate_box = QtWidgets.QDoubleSpinBox()
+        for box, key, tip in (
+            (self.slip_thr_box, "slip_threshold",
+             "FORTE slip_var_threshold: slip when avgL or avgR exceeds this (default 2)"),
+            (self.slip_gate_box, "slip_contact_gate",
+             "Both fingers' averages must reach this, else both are zeroed (default 0.6)"),
+        ):
+            box.setRange(0.0, 1000.0)
+            box.setDecimals(2)
+            box.setSingleStep(0.1)
+            box.setValue(self.settings[key])
+            box.setToolTip(tip)
+            box.valueChanged.connect(self.on_slip_settings_changed)
+        self.slip_sync_label = QtWidgets.QLabel("ESP: not connected")
+        self.slip_lamp = QtWidgets.QLabel(" SLIP ")
+        self.slip_count_label = QtWidgets.QLabel("0 events")
+        self._set_lamp(False)
+        slip_row.addWidget(QtWidgets.QLabel("Slip threshold"))
+        slip_row.addWidget(self.slip_thr_box)
+        slip_row.addSpacing(8)
+        slip_row.addWidget(QtWidgets.QLabel("Contact gate"))
+        slip_row.addWidget(self.slip_gate_box)
+        slip_row.addSpacing(8)
+        slip_row.addWidget(self.slip_sync_label)
+        slip_row.addStretch(1)
+        slip_row.addWidget(self.slip_lamp)
+        slip_row.addWidget(self.slip_count_label)
+        rl.addLayout(slip_row)
+
+        # Debounce: send/save once the spinbox stops changing.
+        self.slip_apply_timer = QtCore.QTimer(self)
+        self.slip_apply_timer.setSingleShot(True)
+        self.slip_apply_timer.setInterval(300)
+        self.slip_apply_timer.timeout.connect(self.apply_slip_settings)
+
         # Alert banner: latest error line from the ESP32 (or the app).
         self.alert_box = QtWidgets.QFrame()
         self.alert_box.setStyleSheet("QFrame { background: #b3261e; border-radius: 4px; }"
@@ -498,6 +607,17 @@ class HebConsole(QtWidgets.QMainWindow):
             self.plots[key] = p
         self.plots[PANELS[-1][0]].setLabel("bottom", "Time", units="s")
 
+        # Threshold and contact gate drawn on the slip panel.
+        self.thr_line = pg.InfiniteLine(angle=0, movable=False,
+                                        pen=pg.mkPen("#e63946", width=1, style=QtCore.Qt.DashLine),
+                                        label="threshold", labelOpts={"position": 0.02, "color": "#e63946"})
+        self.gate_line = pg.InfiniteLine(angle=0, movable=False,
+                                         pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.DotLine),
+                                         label="contact gate", labelOpts={"position": 0.12, "color": "#888888"})
+        self.plots["slip"].addItem(self.thr_line)
+        self.plots["slip"].addItem(self.gate_line)
+        self._update_slip_lines()
+
         # Bar view of current tactile values
         self.bar_plot = pg.PlotWidget()
         self.bar_plot.setMaximumHeight(140)
@@ -571,6 +691,8 @@ class HebConsole(QtWidgets.QMainWindow):
         self.connect_btn.setText("Disconnect")
         self.status.setText(f"Connected: {port} @ {baud}")
         self.log_local(f"Connected to {port}.")
+        self.slip_sync_label.setText("ESP: sending slip settings...")
+        QtCore.QTimer.singleShot(600, self.push_slip_settings)
         self.cmd.setFocus()
 
     def disconnect_port(self):
@@ -632,6 +754,15 @@ class HebConsole(QtWidgets.QMainWindow):
                 continue
             if line.startswith("TMT,pos"):
                 continue                     # column header, not useful in the console
+            slip = parse_slip(line)
+            if slip is not None:
+                self.add_slip(t_host, slip)
+                if show_data:
+                    text_lines.append(line)
+                continue
+            cfg = parse_slipcfg(line)
+            if cfg is not None:
+                self.on_slipcfg(*cfg)
             m = STATS_RE.match(line)
             if m:
                 self.show_esp_stats(m)
@@ -641,6 +772,9 @@ class HebConsole(QtWidgets.QMainWindow):
             text_lines.append(line)
             if line.startswith(ALERT_PREFIXES):
                 self.show_alert(line)
+            if line.startswith("Boots relaxed"):
+                # The ESP32 (re)booted with default thresholds: send ours again.
+                QtCore.QTimer.singleShot(300, self.push_slip_settings)
             if line.startswith("Tactile mode ON"):
                 self.set_mode("tac")
             elif line.startswith("Tactile mode OFF") or line.startswith("Trigger mapping OFF"):
@@ -648,13 +782,17 @@ class HebConsole(QtWidgets.QMainWindow):
         if text_lines:
             self.append_console(text_lines)
 
-    def _stamp(self, t_host):
+    def _rel(self, t_host):
         if self.t0 is None:
             self.t0 = t_host
-        self.rate_times.append(t_host)
-        self.last_sample_time = t_host
         self.new_data = True
         return t_host - self.t0
+
+    def _stamp(self, t_host):
+        # Data-stream samples (T-/TMT-lines) also drive the rate readout.
+        self.rate_times.append(t_host)
+        self.last_sample_time = t_host
+        return self._rel(t_host)
 
     def add_tac(self, t_host, vals):
         if self.mode != "tac":
@@ -673,6 +811,67 @@ class HebConsole(QtWidgets.QMainWindow):
         self.tmt.append(t, d)
         if self.rec_writer:
             self._record(t_host, "tmt", d)
+
+    def add_slip(self, t_host, d):
+        self.slip.append(self._rel(t_host), d)
+        on = d["slip"] >= 0.5
+        if on:
+            self.last_slip_time = t_host
+            if not self.prev_slip:
+                self.slip_events += 1
+                self.slip_count_label.setText(f"{self.slip_events} event{'s' if self.slip_events != 1 else ''}")
+        self.prev_slip = on
+        if self.rec_writer:
+            self._record(t_host, "slip", d)
+
+    # ---- Slip settings ----------------------------------------------------------
+    def current_slip_settings(self):
+        return {"slip_threshold": round(self.slip_thr_box.value(), 3),
+                "slip_contact_gate": round(self.slip_gate_box.value(), 3)}
+
+    def on_slip_settings_changed(self, _value):
+        self._update_slip_lines()
+        self.slip_apply_timer.start()             # debounce
+
+    def apply_slip_settings(self):
+        self.settings.update(self.current_slip_settings())
+        try:
+            save_settings(self.settings)
+        except OSError as e:
+            self.log_local(f"Could not save settings to {SETTINGS_PATH}: {e}")
+        self.push_slip_settings()
+
+    def push_slip_settings(self):
+        if not self.ser:
+            self.slip_sync_label.setText("ESP: not connected (saved)")
+            self.slip_sync_label.setStyleSheet("color: #888;")
+            return
+        cur = self.current_slip_settings()
+        self.send(f"slip_thr {cur['slip_threshold']:.3f}")
+        self.send(f"slip_gate {cur['slip_contact_gate']:.3f}")
+        self.slip_sync_label.setText("ESP: waiting for confirmation...")
+        self.slip_sync_label.setStyleSheet("color: #888;")
+
+    def on_slipcfg(self, thr, gate):
+        cur = self.current_slip_settings()
+        ok = abs(thr - cur["slip_threshold"]) < 1e-3 and abs(gate - cur["slip_contact_gate"]) < 1e-3
+        if ok:
+            self.slip_sync_label.setText(f"ESP in sync: threshold {thr:.2f}, gate {gate:.2f}")
+            self.slip_sync_label.setStyleSheet("color: #4cc38a;")
+        else:
+            self.slip_sync_label.setText(f"ESP uses threshold {thr:.2f}, gate {gate:.2f} (not the app's)")
+            self.slip_sync_label.setStyleSheet("color: #e2590f; font-weight: bold;")
+
+    def _update_slip_lines(self):
+        if hasattr(self, "thr_line"):
+            self.thr_line.setPos(self.slip_thr_box.value())
+            self.gate_line.setPos(self.slip_gate_box.value())
+
+    def _set_lamp(self, on):
+        self.slip_lamp.setStyleSheet(
+            "background: #e63946; color: white; font-weight: bold; border-radius: 3px; padding: 1px 6px;"
+            if on else
+            "background: #3a3a3a; color: #888; font-weight: bold; border-radius: 3px; padding: 1px 6px;")
 
     def _record(self, t_host, mode, row):
         self.rec_writer.writerow([f"{t_host - self.rec_t0:.4f}", mode] +
@@ -694,6 +893,9 @@ class HebConsole(QtWidgets.QMainWindow):
         age = int(m.group("age"))
         txt = (f"ESP {m.group('hz')} Hz | haptic {float(m.group('hap')):.1f} ms | "
                f"gripper fb {m.group('lat')} ms, age {age} ms | Mega bad {bad}/s")
+        if m.group("slip_rate"):
+            txt += (f" | slip {float(m.group('slip_rate')):.0f}/s, "
+                    f"{float(m.group('slip_us')):.0f} us, core0 {float(m.group('slip_cpu')):.0f}%")
         warn = bad > 0 or age < 0 or age > 300
         self.esp_label.setText(txt)
         self.esp_label.setStyleSheet("color: #e2590f; font-weight: bold;" if warn else "color: #888;")
@@ -724,6 +926,7 @@ class HebConsole(QtWidgets.QMainWindow):
             # Fresh traces each time a streaming mode starts.
             self.tac.clear()
             self.tmt.clear()
+            self.slip.clear()
             self.t0 = None
             self.rate_times.clear()
             name = {"tac": "TACTILE", "tmt": "TRIGGER MAP + TACTILE FORCE"}[mode]
@@ -739,6 +942,7 @@ class HebConsole(QtWidgets.QMainWindow):
     # ---- Plotting -------------------------------------------------------------
     def redraw(self):
         now = time.perf_counter()
+        self._set_lamp(now - self.last_slip_time < 0.3)   # hold each slip visible briefly
         if len(self.rate_times) >= 2 and now - self.last_sample_time < 1.0:
             span = self.rate_times[-1] - self.rate_times[0]
             if span > 0:
@@ -755,7 +959,7 @@ class HebConsole(QtWidgets.QMainWindow):
 
         win = self.window_box.value()
         t_end = None
-        for stream in (self.tac, self.tmt):
+        for stream in (self.tac, self.tmt, self.slip):
             t, ys = stream.tail(win)
             if len(t):
                 t_end = t[-1] if t_end is None else max(t_end, t[-1])
