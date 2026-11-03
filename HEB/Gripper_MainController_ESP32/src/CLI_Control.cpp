@@ -385,11 +385,16 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         unsigned long stats_ms = millis() - stats_start_ms;
         if (stats_ms >= 1000)
         {
-            Serial.printf("[%s] loop %.0f Hz, haptic exchange avg %.2f ms / max %.2f ms\n",
+            unsigned long fb_age = 0;
+            bool have_fb = gripper && gripper->latest_feedback(nullptr, nullptr, &fb_age);
+            Serial.printf("[%s] loop %.0f Hz, haptic exchange avg %.2f ms / max %.2f ms, "
+                          "gripper feedback latency %lu ms, age %ld ms\n",
                           tactile_force ? "TMT" : "TM",
                           stats_loops * 1000.0f / stats_ms,
                           stats_haptic_us / 1000.0f / stats_loops,
-                          stats_haptic_max_us / 1000.0f);
+                          stats_haptic_max_us / 1000.0f,
+                          gripper ? gripper->feedback_latency_ms() : 0UL,
+                          have_fb ? (long)fb_age : -1L);
             stats_start_ms = millis();
             stats_loops = stats_haptic_us = stats_haptic_max_us = 0;
         }

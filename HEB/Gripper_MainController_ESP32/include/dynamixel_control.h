@@ -118,6 +118,13 @@ public:
     // (read_position already does).
     bool check_pose_or_relax(float id0_deg, float id1_deg);
 
+    // Most recent valid position feedback (from any reply) and its age.
+    // Returns false if none has been received yet.
+    bool latest_feedback(float* id0_deg, float* id1_deg, unsigned long* age_ms) const;
+
+    // Round-trip time of the last asynchronous position request (ms).
+    unsigned long feedback_latency_ms() const { return _fb_latency_ms; }
+
 private:
     HardwareSerial* _serial;
 
@@ -130,12 +137,24 @@ private:
     // range and nothing moves.
     static constexpr unsigned long HEARTBEAT_SAFE_MS = 400;  // < Mega's 500
     static constexpr unsigned long POSE_CHECK_MS     = 100;
-    // Periodic (already-moving) checks use one short try; a missed reply is
-    // retried next loop and only POSE_MAX_MISSES in a row relaxes. Checks
-    // before a possible re-engage stay strict (2 tries x 200 ms).
-    static constexpr unsigned long POSE_POLL_TIMEOUT_MS = 15;
-    static constexpr int           POSE_MAX_MISSES      = 5;
-    int           _pose_misses        = 0;
+    // While already moving, feedback is asynchronous: a PING is sent every
+    // POSE_CHECK_MS without waiting, and replies are picked up on later
+    // calls (poll_feedback). The control loop never blocks on the Mega.
+    // Each new sample is range-checked; if none arrives for POSE_STALE_MS
+    // the servos are relaxed. A request with no reply after
+    // POSE_REQ_TIMEOUT_MS is considered lost and re-sent.
+    static constexpr unsigned long POSE_STALE_MS       = 500;
+    static constexpr unsigned long POSE_REQ_TIMEOUT_MS = 100;
+    uint8_t       _rx_buf[sizeof(Dyn_Response_Packet)];
+    size_t        _rx_idx          = 0;
+    bool          _req_outstanding = false;
+    unsigned long _req_ms          = 0;
+    bool          _fb_new          = false;
+    float         _fb0 = 0.0f, _fb1 = 0.0f;
+    unsigned long _fb_ms           = 0;
+    unsigned long _fb_latency_ms   = 0;
+    void poll_feedback();
+    void note_feedback(float p0, float p1);
     unsigned long _last_tx_ms         = 0;
     unsigned long _last_pose_check_ms = 0;
     bool          _torque_maybe_off   = true;   // true at boot / after STOP

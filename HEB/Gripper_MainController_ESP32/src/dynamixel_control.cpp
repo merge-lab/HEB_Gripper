@@ -53,6 +53,9 @@ bool DynamixelController::send_command(const Dyn_Command_Packet& packet,
     // late reply can never bleed into (and misframe) this call's read.
     while (_serial->available())
         _serial->read();
+    // That also discards any pending asynchronous reply.
+    _rx_idx = 0;
+    _req_outstanding = false;
 
     _serial->write((const uint8_t*)&packet, sizeof(packet));
     _last_tx_ms = millis();   // any command resets the Mega's heartbeat
@@ -144,36 +147,96 @@ bool DynamixelController::check_pose_or_relax(float id0_deg, float id1_deg)
     return false;
 }
 
+void DynamixelController::note_feedback(float p0, float p1)
+{
+    _fb0 = p0;
+    _fb1 = p1;
+    _fb_ms = millis();
+    _fb_new = true;
+}
+
+bool DynamixelController::latest_feedback(float* id0_deg, float* id1_deg, unsigned long* age_ms) const
+{
+    if (_fb_ms == 0) return false;
+    if (id0_deg) *id0_deg = _fb0;
+    if (id1_deg) *id1_deg = _fb1;
+    if (age_ms)  *age_ms  = millis() - _fb_ms;
+    return true;
+}
+
+void DynamixelController::poll_feedback()
+{
+    // Non-blocking: consume whatever bytes have arrived, frame packets.
+    while (_serial->available()) {
+        uint8_t b = (uint8_t)_serial->read();
+        if (_rx_idx == 0 && b != (uint8_t)DYN_START_BYTE)
+            continue;                                   // resync
+        _rx_buf[_rx_idx++] = b;
+        if (_rx_idx < sizeof(Dyn_Response_Packet))
+            continue;
+        _rx_idx = 0;
+
+        Dyn_Response_Packet r;
+        memcpy(&r, _rx_buf, sizeof(r));
+        if (r.endByte != DYN_END_BYTE)
+            continue;
+        if (r.response != DYN_PONG && r.response != DYN_ACK)
+            continue;
+        float p0, p1;
+        memcpy(&p0, &r.left_motor_position,  sizeof(float));
+        memcpy(&p1, &r.right_motor_position, sizeof(float));
+        if (_req_outstanding) {
+            _fb_latency_ms = millis() - _req_ms;
+            _req_outstanding = false;
+        }
+        if (sample_valid(p0, p1))
+            note_feedback(p0, p1);
+    }
+}
+
 bool DynamixelController::pose_guard()
 {
     unsigned long now = millis();
     bool may_engage = _torque_maybe_off || (now - _last_tx_ms) >= HEARTBEAT_SAFE_MS;
-    bool due        = (now - _last_pose_check_ms) >= POSE_CHECK_MS;
-    if (!may_engage && !due)
-        return true;
 
-    float p0 = 0.0f, p1 = 0.0f;
     if (may_engage) {
-        // Torque may come on with this move: strict. Two tries, since
-        // read_position drops glitch samples.
+        // Torque may come on with this move: strict, blocking. Two tries,
+        // since read_position drops glitch samples.
+        float p0 = 0.0f, p1 = 0.0f;
         if (!(read_position(&p0, &p1, 200) || read_position(&p0, &p1, 200))) {
             reject_and_relax("could not read servo positions", false, 0.0f, 0.0f);
             return false;
         }
-    } else if (!read_position(&p0, &p1, POSE_POLL_TIMEOUT_MS)) {
-        // Already moving with a recent good check: one dropped reply isn't a
-        // reason to drop the gripper. Retry on the next loop (the check time
-        // isn't advanced) and give up only after several misses in a row.
-        if (++_pose_misses >= POSE_MAX_MISSES) {
-            _pose_misses = 0;
-            reject_and_relax("lost servo position feedback (5 missed reads in a row)", false, 0.0f, 0.0f);
-            return false;
-        }
-        return true;
+        _fb_new = false;
+        _last_pose_check_ms = millis();
+        return check_pose_or_relax(p0, p1);
     }
-    _pose_misses = 0;
-    _last_pose_check_ms = millis();
-    return check_pose_or_relax(p0, p1);
+
+    // Already moving: asynchronous. Never wait here.
+    poll_feedback();
+
+    if (_fb_new) {
+        _fb_new = false;
+        if (!check_pose_or_relax(_fb0, _fb1))
+            return false;
+    }
+
+    now = millis();
+    if (now - _fb_ms > POSE_STALE_MS) {
+        reject_and_relax("lost servo position feedback (no reply for 500 ms)", false, 0.0f, 0.0f);
+        return false;
+    }
+
+    bool lost = _req_outstanding && (now - _req_ms) > POSE_REQ_TIMEOUT_MS;
+    if ((!_req_outstanding || lost) && (now - _last_pose_check_ms) >= POSE_CHECK_MS) {
+        Dyn_Command_Packet ping = { DYN_START_BYTE, DYN_PING, 0, 0, 0, 0, DYN_END_BYTE };
+        _serial->write((const uint8_t*)&ping, sizeof(ping));
+        _last_tx_ms = now;
+        _req_outstanding = true;
+        _req_ms = now;
+        _last_pose_check_ms = now;
+    }
+    return true;
 }
 
 bool DynamixelController::move_servo(float id0_deg, float id1_deg,
@@ -212,6 +275,8 @@ bool DynamixelController::move_servo(float id0_deg, float id1_deg,
         memcpy(&p0, &response->left_motor_position,  sizeof(float));
         memcpy(&p1, &response->right_motor_position, sizeof(float));
         if (sample_valid(p0, p1)) {
+            note_feedback(p0, p1);
+            _fb_new = false;
             _last_pose_check_ms = millis();
             if (!check_pose_or_relax(p0, p1)) return false;
         }
@@ -279,6 +344,8 @@ bool DynamixelController::move_servo_log(float id0_deg, float id1_deg,
         memcpy(&p0, &response->left_motor_position,  sizeof(float));
         memcpy(&p1, &response->right_motor_position, sizeof(float));
         if (sample_valid(p0, p1)) {
+            note_feedback(p0, p1);
+            _fb_new = false;
             _last_pose_check_ms = millis();
             if (!check_pose_or_relax(p0, p1)) return false;
         }
@@ -334,6 +401,7 @@ bool DynamixelController::read_position(float* id0_deg, float* id1_deg,
 
     if (!sample_valid(p0, p1))
         return false;
+    note_feedback(p0, p1);
 
     if (id0_deg) *id0_deg = p0;
     if (id1_deg) *id1_deg = p1;
