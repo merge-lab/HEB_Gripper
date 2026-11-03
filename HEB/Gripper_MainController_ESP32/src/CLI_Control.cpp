@@ -74,8 +74,8 @@ void force_ramp_up(HapticMotorController* motor) {
 // constant-force magnitude linearly in TAC_FORCE_MIN..TAC_FORCE_MAX
 // (same units/sign convention as the CLI 'c' command).
 static const float TAC_SUM_MAX   = 3.0f;
-static const float TAC_FORCE_MIN = 0.3f;
-static const float TAC_FORCE_MAX = 1.0f;
+static const float TAC_FORCE_MIN = 0.2f;
+static const float TAC_FORCE_MAX = 1.2f;
 static const float TRIGGER_N_PER_C = 3.18f;   // c x 3.18 = Newtons at the trigger
 
 static float clamp_sum(float s)

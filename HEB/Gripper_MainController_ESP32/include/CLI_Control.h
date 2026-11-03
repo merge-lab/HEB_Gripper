@@ -26,7 +26,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper = null
 // tactile_force = true is 'tmt' mode: same position mapping, but the
 // constant force follows the tactile sensors every loop: tared sums
 // T1+T2+T3 (left finger) and T4+T5+T6 (right finger), each clamped to 0..3;
-// the larger maps linearly to c = 0.3..1.0. Prints machine-readable
+// the larger maps linearly to c = 0.2..1.2. Prints machine-readable
 // "TMT,..." lines for heb_console. 'tare' re-zeroes the sensors.
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                      bool tactile_force = false);

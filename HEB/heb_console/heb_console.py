@@ -81,7 +81,7 @@ CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
 PANELS = [
     ("tactile", "Tactile (tared)", [(f"T{i + 1}", f"T{i + 1}") for i in range(N_TAC)], None),
     ("force", "Haptic force (right axis: N = x 3.18)",
-     [("c", "c sent"), ("stm_cmd", "STM applied"), ("iq", "measured current")], (-0.05, 1.1)),
+     [("c", "c sent"), ("stm_cmd", "STM applied"), ("iq", "measured current")], (-0.05, 1.3)),
     ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
     ("gripper", "Gripper commanded", [("id1", "ID1 (left)"), ("id0", "ID0 (right)")], (-5, 185)),
 ]
