@@ -113,10 +113,16 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                       POS_CLOSE, POS_OPEN);
     }
 
+    // tmt: the initial tare waits until the haptic motor and servos have been
+    // running for a moment. Their current draw shifts the sensors' supply /
+    // ground slightly, so a tare taken while everything is still off leaves
+    // a constant offset once they engage. c is held at its minimum until then.
+    const unsigned long TMT_TARE_DELAY_MS = 500;
+    unsigned long tmt_start_ms = millis();
+    bool tmt_tared = false;
     if (tactile_force)
     {
-        if (tactile_tare())
-            Serial.println("[TMT] tactile tared (keep fingers unloaded at start).");
+        Serial.println("[TMT] auto-tare in 0.5 s - keep the fingers unloaded.");
         Serial.printf("[TMT] c = %.2f..%.2f from max(T1+T2+T3, T4+T5+T6) over 0..%.0f.\n",
                       TAC_FORCE_MIN, TAC_FORCE_MAX, TAC_SUM_MAX);
         Serial.println("TMT commands: tare, v <hz> <amp>, e to exit.");
@@ -218,6 +224,11 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         // tmt: force from the newest tactile sample (shared buffer, no ADC wait).
         float tac[TACTILE_COUNT];
         float sumL = 0.0f, sumR = 0.0f, c_mag = 0.0f;
+        if (tactile_force && !tmt_tared && millis() - tmt_start_ms >= TMT_TARE_DELAY_MS)
+        {
+            tmt_tared = tactile_tare();
+            if (tmt_tared) Serial.println("[TMT] tactile tared (motor + servos active).");
+        }
         if (tactile_force)
         {
             tactile_latest(tac, true);
@@ -225,6 +236,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             sumR = clamp_sum(tac[3] + tac[4] + tac[5]);   // T4..T6: right finger (ID 0)
             float s = sumL > sumR ? sumL : sumR;
             c_mag = TAC_FORCE_MIN + (TAC_FORCE_MAX - TAC_FORCE_MIN) * (s / TAC_SUM_MAX);
+            if (!tmt_tared) c_mag = TAC_FORCE_MIN;   // stale baseline: don't trust it yet
             force = -c_mag;   // same sign convention as 'c'
         }
 
