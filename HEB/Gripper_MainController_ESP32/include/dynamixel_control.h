@@ -41,6 +41,11 @@ const float DXL_ID0_OPEN_DEG   = 0.0f;
 const float DXL_ID1_CLOSED_DEG = 90.0f;     // physical left finger
 const float DXL_ID1_OPEN_DEG   = 180.0f;
 
+// SAFETY: every servo motion must go through move_servo(), move_servo_fast()
+// or move_servo_log(). Those are the only places that apply the range clamp
+// and the ID 0 wrap guard. Never write Dyn_Command_Packet bytes to the
+// gripper serial port directly, and don't add a new move path without
+// calling clamp_to_range() and engage_check() first.
 class DynamixelController
 {
 public:
