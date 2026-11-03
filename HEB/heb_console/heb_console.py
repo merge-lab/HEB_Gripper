@@ -43,7 +43,8 @@ N_TAC = 6                      # T1..T6, matches tactile_sensors.h
 MAX_HISTORY_S = 120            # seconds of data kept for plotting
 MAX_RATE_HZ = 2000             # sizing for the history buffers ('tac 2000')
 DEFAULT_WINDOW_S = 10.0        # visible time window
-PLOT_REFRESH_MS = 33           # ~30 fps redraw
+PLOT_REFRESH_MS = 16           # ~60 fps redraw
+READER_BATCH_S = 0.008         # serial lines reach the GUI at least this often (plot rate limit)
 CONSOLE_MAX_LINES = 5000
 QUICK_COMMANDS = [
     ("tac", "tac", "Stream tactile only (100 Hz, block-averaged)"),
@@ -79,7 +80,9 @@ STATS_RE = re.compile(
 # single-finger contact gate = 0.6).
 SETTINGS_PATH = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                              "heb_console", "settings.json")
-DEFAULT_SETTINGS = {"slip_threshold": 2.0, "slip_contact_gate": 0.6}
+DEFAULT_SETTINGS = {"slip_threshold": 2.0, "slip_contact_gate": 0.6,
+                    # Optional extra plots (off by default to leave room for the main panels).
+                    "show_bars": False, "show_friction": False}
 
 
 def load_settings():
@@ -88,7 +91,10 @@ def load_settings():
         with open(SETTINGS_PATH) as f:
             saved = json.load(f)
         for key, default in DEFAULT_SETTINGS.items():
-            if isinstance(saved.get(key), (int, float)):
+            if isinstance(default, bool):
+                if isinstance(saved.get(key), bool):
+                    settings[key] = saved[key]
+            elif isinstance(saved.get(key), (int, float)):
                 settings[key] = float(saved[key])
     except (OSError, ValueError):
         pass                                     # first run or unreadable: defaults
@@ -280,7 +286,7 @@ class SerialReader(QtCore.QThread):
                     raw, buf = buf.split(b"\n", 1)
                     pending.append((now, raw.decode("utf-8", errors="replace").rstrip("\r")))
             now = time.perf_counter()
-            if pending and (now - last_emit >= 0.02 or len(pending) >= 200):
+            if pending and (now - last_emit >= READER_BATCH_S or len(pending) >= 200):
                 self.batch.emit(pending)
                 pending = []
                 last_emit = now
@@ -594,6 +600,14 @@ class HebConsole(QtWidgets.QMainWindow):
             cb.toggled.connect(lambda on, k=key: self.set_panel_visible(k, on))
             self.panel_cbs[key] = cb
             vis.addWidget(cb)
+        vis.addSpacing(16)
+        vis.addWidget(QtWidgets.QLabel("Extra:"))
+        self.bars_cb = QtWidgets.QCheckBox("Bars")
+        self.bars_cb.setToolTip("Bar view of the current T1..T6 values")
+        self.fric_cb = QtWidgets.QCheckBox("Friction")
+        self.fric_cb.setToolTip("Trigger friction vs position (from Friction ID)")
+        vis.addWidget(self.bars_cb)
+        vis.addWidget(self.fric_cb)
         vis.addStretch(1)
         rl.addLayout(vis)
 
@@ -692,6 +706,13 @@ class HebConsole(QtWidgets.QMainWindow):
         self.fric_cap.hide()
         self._set_friction_title("Trigger friction: no map yet - press 'Friction ID' (hands off the trigger)")
         rl.addWidget(self.fric_plot)
+
+        # Extra plots: hidden unless enabled; the choice is remembered.
+        for cb, widget, key in ((self.bars_cb, self.bar_plot, "show_bars"),
+                                (self.fric_cb, self.fric_plot, "show_friction")):
+            cb.setChecked(bool(self.settings[key]))
+            widget.setVisible(cb.isChecked())
+            cb.toggled.connect(lambda on, w=widget, k=key: self._toggle_extra(w, k, on))
 
         split.addWidget(right)
         split.setSizes([560, 940])
@@ -928,9 +949,19 @@ class HebConsole(QtWidgets.QMainWindow):
             if self.fric_header is not None:
                 self._show_friction(self.fric_header, self.fric_rows)
                 self._save_friction(self.fric_header, self.fric_rows)
+                if self.mode == "fid":
+                    self.fric_cb.setChecked(True)   # a new measurement: show it
             self.fric_header = None
             return True
         return False
+
+    def _toggle_extra(self, widget, key, on):
+        widget.setVisible(on)
+        self.settings[key] = on
+        try:
+            save_settings(self.settings)
+        except OSError as e:
+            self.log_local(f"Could not save settings to {SETTINGS_PATH}: {e}")
 
     def _set_friction_title(self, text):
         self.fric_plot.setTitle(text)
@@ -1192,7 +1223,7 @@ def main():
     args = ap.parse_args()
 
     app = QtWidgets.QApplication(sys.argv)
-    pg.setConfigOptions(antialias=True)
+    pg.setConfigOptions(antialias=False)   # anti-aliasing is the costly part of drawing many points
     win = HebConsole(port=args.port, baud=args.baud)
     win.show()
     sys.exit(app.exec_())
