@@ -120,6 +120,17 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     const unsigned long TMT_TARE_DELAY_MS = 500;
     unsigned long tmt_start_ms = millis();
     bool tmt_tared = false;
+
+    // Loop timing. The loop runs on a fixed LOOP_PERIOD_US schedule instead
+    // of a fixed delay; the haptic UART exchange (~4.5 ms at 115200 baud)
+    // is the floor. Printing is rate-limited so output doesn't scale with
+    // the loop rate, and timing stats are reported once per second.
+    const unsigned long LOOP_PERIOD_US  = 5000;                       // 200 Hz target
+    const unsigned long PRINT_PERIOD_US = tactile_force ? 10000 : 50000; // TMT 100 Hz, TM 20 Hz
+    unsigned long next_loop_us  = micros();
+    unsigned long last_print_us = 0;
+    unsigned long stats_start_ms = millis();
+    unsigned long stats_loops = 0, stats_haptic_us = 0, stats_haptic_max_us = 0;
     if (tactile_force)
     {
         Serial.println("[TMT] auto-tare in 0.5 s - keep the fingers unloaded.");
@@ -243,7 +254,9 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         // Keep the selected base force and heartbeat active; the STM32 retains
         // the vibration overlay and handles limit gating and ramp at 1 kHz.
         Response_Packet resp;
+        unsigned long haptic_t0 = micros();
         bool ok = motor->set_constant_force(force, &resp);
+        unsigned long haptic_us = micros() - haptic_t0;
 
         if (!ok)
         {
@@ -265,7 +278,13 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         if (gripper)
             gripper->move_servo_fast(id0_deg, id1_deg);
 
-        if (tactile_force)
+        unsigned long now_us = micros();
+        bool print_now = (now_us - last_print_us) >= PRINT_PERIOD_US;
+        if (print_now) last_print_us = now_us;
+
+        if (!print_now)
+            ;   // rate-limited
+        else if (tactile_force)
             // Machine-readable line for heb_console (see header line above).
             Serial.printf("TMT,%.2f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                           pos_deg, t, id0_deg, id1_deg, sumL, sumR, c_mag,
@@ -274,7 +293,36 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
                           pos_deg, t, id0_deg, id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
 
-        delay(15);
+        // Once-per-second timing report.
+        stats_loops++;
+        stats_haptic_us += haptic_us;
+        if (haptic_us > stats_haptic_max_us) stats_haptic_max_us = haptic_us;
+        unsigned long stats_ms = millis() - stats_start_ms;
+        if (stats_ms >= 1000)
+        {
+            Serial.printf("[%s] loop %.0f Hz, haptic exchange avg %.2f ms / max %.2f ms\n",
+                          tactile_force ? "TMT" : "TM",
+                          stats_loops * 1000.0f / stats_ms,
+                          stats_haptic_us / 1000.0f / stats_loops,
+                          stats_haptic_max_us / 1000.0f);
+            stats_start_ms = millis();
+            stats_loops = stats_haptic_us = stats_haptic_max_us = 0;
+        }
+
+        // Fixed-rate schedule: wait out the rest of the period (if any).
+        // If a cycle overran by more than a full period, resync rather than
+        // bursting to catch up.
+        next_loop_us += LOOP_PERIOD_US;
+        long wait_us = (long)(next_loop_us - micros());
+        if (wait_us > 0)
+        {
+            // Sleep whole ms (yields to other tasks), spin the remainder.
+            if (wait_us >= 1000) delay(wait_us / 1000);
+            long rest = (long)(next_loop_us - micros());
+            if (rest > 0) delayMicroseconds(rest);
+        }
+        else if (wait_us < -(long)LOOP_PERIOD_US)
+            next_loop_us = micros();
     }
 }
 
