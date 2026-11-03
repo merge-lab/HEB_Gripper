@@ -76,6 +76,7 @@ void force_ramp_up(HapticMotorController* motor) {
 static const float TAC_SUM_MAX   = 3.0f;
 static const float TAC_FORCE_MIN = 0.3f;
 static const float TAC_FORCE_MAX = 1.0f;
+static const float TRIGGER_N_PER_C = 3.18f;   // c x 3.18 = Newtons at the trigger
 
 static float clamp_sum(float s)
 {
@@ -140,8 +141,9 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     if (tactile_force)
     {
         Serial.println("[TMT] auto-tare in 0.5 s - keep the fingers unloaded.");
-        Serial.printf("[TMT] c = %.2f..%.2f from max(T1+T2+T3, T4+T5+T6) over 0..%.0f.\n",
-                      TAC_FORCE_MIN, TAC_FORCE_MAX, TAC_SUM_MAX);
+        Serial.printf("[TMT] c = %.2f..%.2f (%.2f..%.2f N) from max(T1+T2+T3, T4+T5+T6) over 0..%.0f.\n",
+                      TAC_FORCE_MIN, TAC_FORCE_MAX,
+                      TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C, TAC_SUM_MAX);
         Serial.println("TMT commands: tare, v <hz> <amp>, e to exit.");
         Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6");   // column header
     }

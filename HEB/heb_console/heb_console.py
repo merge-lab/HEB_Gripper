@@ -50,6 +50,9 @@ QUICK_COMMANDS = [
     ("relax", "stop", "Relax the haptic motor"),
 ]
 
+# Haptic trigger force: c (command units) x 3.18 = Newtons at the trigger.
+NEWTONS_PER_C = 3.18
+
 # Fields of a "TMT,..." line, in order (see trigger_mapping() in CLI_Control.cpp).
 TMT_FIELDS = ["pos", "t", "id0", "id1", "sumL", "sumR", "c"] + [f"T{i + 1}" for i in range(N_TAC)]
 CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
@@ -57,7 +60,7 @@ CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
 # Plot panels: (key, title, [(series, label)], fixed y-range or None for auto)
 PANELS = [
     ("tactile", "Tactile (tared)", [(f"T{i + 1}", f"T{i + 1}") for i in range(N_TAC)], None),
-    ("force", "Haptic force c", [("c", "c")], (0.25, 1.05)),
+    ("force", "Haptic force c (right axis: N = c x 3.18)", [("c", "c")], (0.25, 1.05)),
     ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
     ("gripper", "Gripper commanded", [("id1", "ID1 (left)"), ("id0", "ID0 (right)")], (-5, 185)),
 ]
@@ -75,6 +78,13 @@ SERIES_COLORS = {
     "c": "#4cc38a",
     "pos": "#d9d9d9",
 }
+
+
+class NewtonAxis(pg.AxisItem):
+    """Right-hand axis for the force plot: same view, ticks shown in N."""
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{v * NEWTONS_PER_C:.2f}" for v in values]
 
 
 def parse_tactile(line):
@@ -380,7 +390,11 @@ class HebConsole(QtWidgets.QMainWindow):
         self.curves = {}
         first = None
         for row, (key, title, series, yr) in enumerate(PANELS):
-            p = self.glw.addPlot(row=row, col=0, title=title)
+            axes = {"right": NewtonAxis(orientation="right")} if key == "force" else None
+            p = self.glw.addPlot(row=row, col=0, title=title, axisItems=axes)
+            if key == "force":
+                p.showAxis("right")
+                p.setLabel("right", "N")
             p.showGrid(x=True, y=True, alpha=0.3)
             p.addLegend(offset=(5, 5))
             if yr:
@@ -647,7 +661,8 @@ class HebConsole(QtWidgets.QMainWindow):
             lo, hi = min(-1.0, min(latest)), max(1.0, max(latest))
             self.bar_plot.setYRange(lo - 0.1, hi + 0.1, padding=0)
         if self.tmt.t:
-            self.c_label.setText(f"c = {self.tmt.series['c'][-1]:.3f}")
+            c = self.tmt.series['c'][-1]
+            self.c_label.setText(f"c = {c:.3f}  ({c * NEWTONS_PER_C:.2f} N)")
 
     # ---- Recording ------------------------------------------------------------
     def toggle_record(self, on):
