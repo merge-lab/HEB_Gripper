@@ -1,4 +1,5 @@
 #include "CLI_Control.h"
+#include "tactile_sensors.h"
 #include <esp_timer.h>
 #include <math.h>
 
@@ -593,6 +594,62 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
     Serial.println("[MW] done. Torque turns off ~0.5 s after this.");
 }
 
+void tactile_mode(HapticMotorController* motor, DynamixelController* gripper)
+{
+    // Tactile-only: relax the haptic motor and the gripper so nothing moves
+    // while we stream sensor data.
+    motor->relax(nullptr);
+    if (gripper) gripper->stop(nullptr);
+
+    const unsigned long PERIOD_US = 10000;   // 100 Hz
+    Serial.println("Tactile mode ON: T1..T6 at 100 Hz (-1..+1). Haptic relaxed, gripper torque off.");
+    Serial.println("Type 'e' + Enter to exit.");
+
+    char  cmd[16];
+    int   cmd_len   = 0;
+    unsigned long samples = 0, overruns = 0;
+    unsigned long next_us = micros();
+    float mapped[TACTILE_COUNT];
+
+    while (true)
+    {
+        // Non-blocking line input: readStringUntil() could stall the loop.
+        while (Serial.available()) {
+            char c = (char)Serial.read();
+            if (c == '\n' || c == '\r') {
+                cmd[cmd_len] = '\0';
+                if (cmd_len == 1 && (cmd[0] == 'e' || cmd[0] == 'E')) {
+                    Serial.printf("Tactile mode OFF. %lu samples, %lu late (>10 ms) cycles.\n",
+                                  samples, overruns);
+                    return;
+                }
+                cmd_len = 0;
+            } else if (cmd_len < (int)sizeof(cmd) - 1) {
+                cmd[cmd_len++] = c;
+            }
+        }
+
+        // Fixed-rate schedule: next_us advances by exactly one period, so the
+        // average rate stays 100 Hz even if a single cycle runs late.
+        long wait = (long)(next_us - micros());
+        if (wait > 0) {
+            if (wait > 1000) delay(wait / 1000 - 1 > 0 ? wait / 1000 - 1 : 0);
+            while ((long)(next_us - micros()) > 0) { }
+        } else if (wait < -(long)PERIOD_US) {
+            // Fell more than a full period behind (e.g. USB stalled):
+            // resync instead of bursting to catch up.
+            overruns++;
+            next_us = micros();
+        }
+        next_us += PERIOD_US;
+
+        tactile_read(mapped);
+        samples++;
+        Serial.printf("T1:%.3f,T2:%.3f,T3:%.3f,T4:%.3f,T5:%.3f,T6:%.3f\n",
+                      mapped[0], mapped[1], mapped[2], mapped[3], mapped[4], mapped[5]);
+    }
+}
+
 void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 {
     pinMode(SWITCH_40_PIN, INPUT_PULLUP);
@@ -623,7 +680,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <id0> <id1> [spd]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
-    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   hu (haptic update)   cal (calibrate)   sl (send limits)");
+    Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac (tactile stream)   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -667,6 +724,10 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (line.equalsIgnoreCase("tml")) {
             trigger_mapping_log(motor, gripper);
+            relaxed = true; sweep = false; value = 0.0f;
+        }
+        else if (line.equalsIgnoreCase("tac")) {
+            tactile_mode(motor, gripper);
             relaxed = true; sweep = false; value = 0.0f;
         }
         else if (line.equalsIgnoreCase("gpos")) {

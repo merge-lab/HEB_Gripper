@@ -39,6 +39,10 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
 // 'r' resets min/max, 'e' exits and prints the final range.
 void gripper_position_mode(DynamixelController* gripper);
 
+// Tactile-only mode: relaxes the haptic motor and the gripper, then prints
+// T1..T6 (mapped -1..+1) at a fixed 100 Hz. 'e' + Enter exits.
+void tactile_mode(HapticMotorController* motor, DynamixelController* gripper);
+
 // Slow, watched test move: moves to the goals (rejected if out of range) at rpm, polls and
 // prints actual vs goal every 100 ms until settled or 20 s. 'e' stops.
 // Note: the speed persists on the servos for later moves (e.g. tm) until

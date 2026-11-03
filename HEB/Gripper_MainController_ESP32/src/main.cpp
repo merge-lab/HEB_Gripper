@@ -2,6 +2,7 @@
 #include "haptic_motor_control.h"
 #include "dynamixel_control.h"
 #include "CLI_Control.h"
+#include "tactile_sensors.h"
 
 // I2C temp sensor (CJMCU-9808) monitoring the haptic motor - disabled for now.
 // Wiring when re-enabled: ESP32 SCL=14 -> sensor SCL, ESP32 SDA=13 -> sensor SDA,
@@ -20,6 +21,7 @@ void setup() {
   pinMode(2, OUTPUT);                          // onboard LED used as a link indicator
   Serial.begin(115200);                        // USB CDC serial for debug output
   Serial2.begin(115200, SERIAL_8N1, 16, 17);   // link to the STM32
+  tactile_begin();                             // ADC pins 4,5,6,8,9,10 for T1..T6
   gripper.begin();                             // link to the Arduino gripper board (GPIO 35/21)
   delay(500);
 
