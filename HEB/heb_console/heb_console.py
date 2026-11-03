@@ -181,6 +181,15 @@ class NewtonAxis(pg.AxisItem):
         return [f"{v * NEWTONS_PER_C:.2f}" for v in values]
 
 
+# Commands that start an ESP32 mode. The ESP32 ignores them while another
+# mode is running, so the app exits the current mode ('e') first.
+MODE_COMMANDS = ("tac", "tmt", "tm", "tml", "hu", "gpos", "cal")
+
+
+def is_mode_command(text):
+    return text.split()[0].lower() in MODE_COMMANDS if text.split() else False
+
+
 def parse_tactile(line):
     """'T1:0.1,T2:0.2,...,T6:0.6' -> [0.1, ..., 0.6], else None."""
     if not line.startswith("T1:"):
@@ -738,6 +747,16 @@ class HebConsole(QtWidgets.QMainWindow):
         if not self.ser:
             self.log_local("Not connected.")
             return
+        if self.mode is not None and is_mode_command(text):
+            # Leave the running mode first; send the new one once it has exited.
+            self._write_line("e")
+            QtCore.QTimer.singleShot(400, lambda t=text: self._write_line(t))
+            return
+        self._write_line(text)
+
+    def _write_line(self, text):
+        if not self.ser:
+            return
         try:
             self.ser.write((text + "\n").encode("utf-8"))
         except (serial.SerialException, OSError) as e:
@@ -783,7 +802,9 @@ class HebConsole(QtWidgets.QMainWindow):
             if line.startswith(ALERT_PREFIXES):
                 self.show_alert(line)
             if line.startswith("Boots relaxed"):
-                # The ESP32 (re)booted with default thresholds: send ours again.
+                # The ESP32 (re)booted: no mode is running, and it has default
+                # slip thresholds, so send ours again.
+                self.set_mode(None)
                 QtCore.QTimer.singleShot(300, self.push_slip_settings)
             if line.startswith("Tactile mode ON"):
                 self.set_mode("tac")
@@ -897,7 +918,7 @@ class HebConsole(QtWidgets.QMainWindow):
 
     def _record(self, t_host, mode, row):
         self.rec_writer.writerow([f"{t_host - self.rec_t0:.4f}", mode] +
-                                 [("%.4g" % row[f]) if f in row else "" for f in TMT_FIELDS])
+                                 [("%.4g" % row[f]) if f in row else "" for f in CSV_FIELDS[2:]])
         self.rec_count += 1
 
     def append_console(self, lines):
