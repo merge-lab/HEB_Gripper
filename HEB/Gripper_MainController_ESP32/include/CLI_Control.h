@@ -51,11 +51,12 @@ void gripper_position_mode(DynamixelController* gripper);
 // 'tare' re-zeroes, 'e' + Enter exits.
 void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, int out_hz = 100);
 
-// Slow, watched test move: moves to the goals (rejected if out of range) at rpm, polls and
-// prints actual vs goal every 100 ms until settled or 20 s. 'e' stops.
-// Note: the speed persists on the servos for later moves (e.g. tm) until
-// the servos are power-cycled.
-void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm);
+// Watched move: streams the goals (rejected if out of range) through the
+// driver's motion shaper capped at rpm (<= 0: full shaper speed), printing
+// actual vs goal every 100 ms when verbose, until reached, stalled or 20 s.
+// 'e' stops. The servos' own speed setting is not changed.
+void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm,
+                        bool verbose = true);
 
 /*
 Serial CLI tool for sending and testing commands
@@ -72,9 +73,9 @@ Haptic motor:
   stop         relax: zero all force (also: x / relax)
 
 Gripper (Dynamixel):
-  m <id0> <id1>        move ID0 (phys. right) / ID1 (phys. left); out of range = rejected + relaxed
-  m <id0> <id1> <spd>  same, at spd RPM
-  mw <id0> <id1> [rpm] slow watched move (default 5 rpm), prints actual vs goal
+  m <id0> <id1> [rpm]  move ID0 (phys. right) / ID1 (phys. left), full speed by default;
+                       out of range = rejected + relaxed; prints the result
+  mw <id0> <id1> [rpm] same, slow by default (5 rpm), prints actual vs goal
   gstop              torque off both servos
   gping              ping the Arduino gripper board
   gpos               torque off + stream positions (find range of motion)

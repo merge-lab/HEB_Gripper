@@ -83,6 +83,12 @@ void detector_task(void*)
 void slip_begin()
 {
     if (task) return;
+    if (tactile_nominal_hz() != SlipCore::FS) {
+        // FORTE's band, window and update rate assume 2 kHz samples.
+        Serial.printf("[SLIP] disabled: tactile sampling is %d Hz, the detector needs %d Hz.\n",
+                      tactile_nominal_hz(), SlipCore::FS);
+        return;
+    }
     // Core 0, just below the tactile ADC task (5) so sampling always wins.
     xTaskCreatePinnedToCore(detector_task, "slip", 4096, nullptr, 4, &task, 0);
 }

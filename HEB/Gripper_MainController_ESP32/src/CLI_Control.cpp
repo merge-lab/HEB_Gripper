@@ -649,88 +649,43 @@ void gripper_position_mode(DynamixelController* gripper)
     Serial.printf("  ID1 (left) : %.2f .. %.2f deg (span %.2f)\n", r_min, r_max, r_max - r_min);
 }
 
-static const char* dyn_resp_name(uint8_t code)
-{
-    switch (code) {
-        case DYN_ACK:       return "ACK";
-        case DYN_PONG:      return "PONG";
-        case DYN_FAILURE:   return "FAILURE (Mega could not write to the servos)";
-        case DYN_MALFORMED: return "MALFORMED (Mega received a garbled packet)";
-        default:            return "unknown reply code";
-    }
-}
-
-void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm)
+void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_deg, float rpm,
+                        bool verbose)
 {
     if (!gripper) { Serial.println("no gripper link"); return; }
 
-    // Slow, watched move for testing targets. rpm <= 0 would mean "leave the
-    // previous speed" (often unlimited), so refuse it here.
-    if (!(rpm > 0.0f) || rpm > 30.0f) {
-        Serial.println("[MW] rpm must be > 0 and <= 30");
-        return;
-    }
+    // rpm <= 0 means "as fast as the shaper allows" (GRIPPER_MAX_DEG_PER_S).
+    const float max_rpm = GRIPPER_MAX_DEG_PER_S / 6.0f;
+    if (!(rpm > 0.0f) || rpm > max_rpm) rpm = max_rpm;
 
-    // Out-of-range goals are rejected (and the servos relaxed) by the driver;
-    // check here too so we can say so before touching anything.
     if (!DynamixelController::command_in_range(id0_deg, id1_deg)) {
         Serial.printf("[MW] REJECTED: goal out of range. Allowed ID0 %.0f..%.0f, ID1 %.0f..%.0f\n",
-                      DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
-                      DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
+                      DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG, DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
         gripper->stop(nullptr);
         return;
     }
 
     float p0 = NAN, p1 = NAN;
     if (!gripper->read_position(&p0, &p1, 200)) {
-        Serial.println("[MW] no PONG from gripper board - check link / Mega power. Aborting.");
+        Serial.println("[MW] no reply from gripper board - check link / Mega power. Aborting.");
         return;
     }
     const float start0 = p0, start1 = p1;
-    Serial.printf("[MW] start  ID0=%7.2f ID1=%7.2f\n", p0, p1);
-    if (fabsf(id0_deg - start0) < 1.0f) Serial.println("[MW] note: ID0 is already at its goal");
-    if (fabsf(id1_deg - start1) < 1.0f) Serial.println("[MW] note: ID1 is already at its goal");
+    if (verbose)
+        Serial.printf("[MW] start  ID0=%7.2f ID1=%7.2f -> goal ID0=%7.2f ID1=%7.2f at %.1f rpm "
+                      "('e' + Enter = stop, torque off)\n", p0, p1, id0_deg, id1_deg, rpm);
 
-    // Send the move, retrying a few times. The Mega does several servo bus
-    // transactions before it replies (torque on, speed, move, readback), so
-    // allow a generous timeout, and report *why* it failed.
-    bool acked = false;
-    for (int attempt = 1; attempt <= 3 && !acked; attempt++)
-    {
-        Dyn_Response_Packet resp = {};
-        bool got = gripper->move_servo(id0_deg, id1_deg, rpm, rpm, &resp, 1000);
-        if (gripper->last_move_blocked()) {
-            // Guard already printed why; nothing was sent, torque untouched.
-            Serial.println("[MW] not moving (range guard relaxed the servos).");
-            return;
-        }
-        if (got && resp.response == DYN_ACK) {
-            acked = true;
-        } else if (!got) {
-            Serial.printf("[MW] attempt %d: no reply from Mega within 1 s\n", attempt);
-        } else {
-            Serial.printf("[MW] attempt %d: Mega replied %u = %s\n",
-                          attempt, resp.response, dyn_resp_name(resp.response));
-        }
-        if (!acked) delay(50);
-    }
-    if (!acked) {
-        Serial.println("[MW] move failed 3 times - sending STOP (torque off) for safety.");
-        Serial.println("[MW] If FAILURE: check servo LEDs (blinking = hardware error) and power-cycle the servos.");
-        gripper->stop(nullptr);
-        return;
-    }
-    Serial.printf("[MW] goal   ID0=%7.2f ID1=%7.2f at %.1f rpm  ('e' + Enter = stop, torque off)\n",
-                  id0_deg, id1_deg, rpm);
+    // Stream the goal through the driver's shaper at the requested speed. The
+    // servos' own Profile Velocity is never touched, so nothing slow persists
+    // afterwards; pacing, feedback and the range guard are the same as tm/tmt.
+    gripper->set_stream_speed_limit(rpm * 6.0f);
 
-    // The Mega turns torque off if it hears nothing for 500 ms, so keep
-    // polling (PING) every 100 ms for the whole move — this also reports
-    // the actual position. Finish when both are within 1 deg of the goal,
-    // or both have stopped moving for 1.5 s (after the first second), or 20 s.
-    unsigned long start = millis();
-    int still_count = 0, miss_count = 0;
+    const unsigned long start_ms = millis();
+    unsigned long last_print = 0, still_since = 0;
     float last0 = p0, last1 = p1;
-    while (millis() - start < 20000UL)
+    bool reached = false, aborted = false;
+
+    while (millis() - start_ms < 20000UL)
     {
         if (Serial.available()) {
             String l = Serial.readStringUntil('\n');
@@ -738,49 +693,48 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
             if (l.equalsIgnoreCase("e")) {
                 gripper->stop(nullptr);
                 Serial.println("[MW] stopped by user (torque off)");
-                return;
+                aborted = true;
+                break;
             }
         }
 
-        float n0, n1;
-        if (gripper->read_position(&n0, &n1, 200)) {
-            miss_count = 0;
-            p0 = n0; p1 = n1;
-            Serial.printf("[MW] actual ID0=%7.2f (err %+6.2f)  ID1=%7.2f (err %+6.2f)\n",
-                          p0, p0 - id0_deg, p1, p1 - id1_deg);
-            if (!gripper->check_pose_or_relax(p0, p1)) {
-                Serial.println("[MW] aborted: a servo left its allowed range.");
-                return;
-            }
-            bool at_goal = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
-            if (at_goal) break;
-            bool still = fabsf(p0 - last0) < 0.2f && fabsf(p1 - last1) < 0.2f;
-            still_count = (still && millis() - start > 1000UL) ? still_count + 1 : 0;
-            if (still_count >= 15) break;
-            last0 = p0; last1 = p1;
-        } else if (++miss_count >= 4) {
-            // ~4 missed polls in a row also lets the Mega heartbeat expire.
-            Serial.println("[MW] lost contact with gripper board (4 missed polls) - aborting");
-            gripper->stop(nullptr);
-            return;
-        } else {
-            Serial.println("[MW] missed one position poll");
+        gripper->move_servo_fast(id0_deg, id1_deg);
+        if (gripper->last_move_blocked()) {      // guard relaxed the servos and said why
+            Serial.println("[MW] aborted by the range guard.");
+            aborted = true;
+            break;
         }
-        delay(100);
+
+        unsigned long age;
+        if (gripper->latest_feedback(&p0, &p1, &age) && millis() - last_print >= 100) {
+            last_print = millis();
+            if (verbose)
+                Serial.printf("[MW] actual ID0=%7.2f (err %+6.2f)  ID1=%7.2f (err %+6.2f)\n",
+                              p0, p0 - id0_deg, p1, p1 - id1_deg);
+            reached = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
+            if (reached) break;
+            // Stalled: no movement for 1.5 s (after the first second).
+            const bool still = fabsf(p0 - last0) < 0.2f && fabsf(p1 - last1) < 0.2f;
+            if (!still || millis() - start_ms < 1000) still_since = millis();
+            else if (millis() - still_since > 1500) break;
+            last0 = p0; last1 = p1;
+        }
+        delay(5);
     }
+    gripper->set_stream_speed_limit(GRIPPER_MAX_DEG_PER_S);
+    if (aborted) return;
 
     // Per-servo verdict so a single misbehaving servo is obvious.
     const float goals[2]  = { id0_deg, id1_deg };
     const float starts[2] = { start0, start1 };
     const float ends[2]   = { p0, p1 };
     for (int i = 0; i < 2; i++) {
-        float err   = ends[i] - goals[i];
-        float moved = fabsf(ends[i] - starts[i]);
-        const char* verdict;
-        if (fabsf(err) < 1.0f)                                 verdict = "reached goal";
-        else if (moved < 0.5f && fabsf(goals[i] - starts[i]) >= 1.0f)
-                                                               verdict = "DID NOT MOVE (target rejected, servo in error, or torque off)";
-        else                                                   verdict = "STOPPED SHORT (obstruction or rejected target)";
+        const float err   = ends[i] - goals[i];
+        const float moved = fabsf(ends[i] - starts[i]);
+        const char* verdict =
+            fabsf(err) < 1.0f                                   ? "reached goal" :
+            (moved < 0.5f && fabsf(goals[i] - starts[i]) >= 1.0f) ? "DID NOT MOVE (servo in error, or torque off)" :
+                                                                   "STOPPED SHORT (obstruction?)";
         Serial.printf("[MW] ID%d: start %.2f -> end %.2f (goal %.2f, err %+.2f): %s\n",
                       i, starts[i], ends[i], goals[i], err, verdict);
     }
@@ -897,7 +851,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     }
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
-    Serial.println("Gripper: m <id0> <id1> [spd]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
+    Serial.println("Gripper: m <id0> <id1> [rpm]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac [hz] (tactile stream, 100 default, 2000 max)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Slip:    slip_thr <v>   slip_gate <v>   slip?   (FORTE detector, on-board at 2 kHz)");
     Serial.println("Boots relaxed - send a command to engage.");
@@ -978,7 +932,7 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                 float id0 = a.toFloat();
                 float id1 = a.substring(sp1 + 1).toFloat();
                 float rpm = (sp2 >= 0) ? a.substring(sp2 + 1).toFloat() : 5.0f;
-                gripper_move_watch(gripper, id0, id1, rpm);
+                gripper_move_watch(gripper, id0, id1, rpm, /*verbose=*/true);
             }
         }
         else if (line.equalsIgnoreCase("hu")) {
@@ -1035,27 +989,17 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                 vibAmp  = (sp >= 0) ? arg.substring(sp + 1).toFloat() : vibAmp;
                 applyVibrate(vibFreq, vibAmp, motor);
             } else if ((ch == 'm' || ch == 'M') && gripper) {
-                // m <id0_deg> <id1_deg> [speed_rpm]
+                // m <id0_deg> <id1_deg> [rpm]: same as mw, only the result is printed.
                 int sp1 = arg.indexOf(' ');
                 int sp2 = (sp1 >= 0) ? arg.indexOf(' ', sp1 + 1) : -1;
-                float l_deg = arg.toFloat();
-                float r_deg = (sp1 >= 0) ? arg.substring(sp1 + 1).toFloat() : l_deg;
-                float spd   = (sp2 >= 0) ? arg.substring(sp2 + 1).toFloat() : 0.0f;
-                Dyn_Response_Packet resp = {};
-                bool ok = gripper->move_servo(l_deg, r_deg, spd, spd, &resp);
-                if (gripper->last_move_blocked()) {
-                    Serial.printf("move REJECTED, servos relaxed. Allowed ID0 %.0f..%.0f, ID1 %.0f..%.0f\n",
-                                  DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
-                                  DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
-                    return;
+                if (sp1 < 0) {
+                    Serial.println("usage: m <id0_deg> <id1_deg> [rpm]");
+                } else {
+                    float id0 = arg.toFloat();
+                    float id1 = arg.substring(sp1 + 1).toFloat();
+                    float rpm = (sp2 >= 0) ? arg.substring(sp2 + 1).toFloat() : 0.0f;
+                    gripper_move_watch(gripper, id0, id1, rpm, /*verbose=*/false);
                 }
-                float lmA, rmA;
-                memcpy(&lmA, &resp.left_motor_current,  sizeof(lmA));
-                memcpy(&rmA, &resp.right_motor_current, sizeof(rmA));
-                Serial.printf("move ID0=%.1f ID1=%.1f spd=%.0f -> %s (ID0=%.0fmA ID1=%.0fmA)\n",
-                              l_deg, r_deg, spd,
-                              ok ? (resp.response == DYN_ACK ? "ACK" : "FAIL") : "no resp",
-                              lmA, rmA);
             } else if (line.equalsIgnoreCase("gstop") && gripper) {
                 Dyn_Response_Packet resp;
                 bool ok = gripper->stop(&resp);

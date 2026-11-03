@@ -127,6 +127,7 @@ void DynamixelController::reject_and_relax(const char* why, bool have_pose, floa
     stop(nullptr);
     _last_blocked = true;
     _bad_pose_streak = 0;
+    _engage_retry_ms = millis() + ENGAGE_BACKOFF_MS;
 
     // Rate-limit the message: tm/hu may hit this every few ms.
     if (millis() - _last_warn_ms > 1000UL) {
@@ -204,6 +205,12 @@ void DynamixelController::poll_feedback()
     }
 }
 
+void DynamixelController::set_stream_speed_limit(float deg_per_s)
+{
+    if (!(deg_per_s > 0.0f)) deg_per_s = GRIPPER_MAX_DEG_PER_S;     // also NaN
+    _sm_vmax = deg_per_s < GRIPPER_MAX_DEG_PER_S ? deg_per_s : GRIPPER_MAX_DEG_PER_S;
+}
+
 void DynamixelController::seed_shaper(float p0, float p1)
 {
     // Start from where the fingers are (clamped into the command range so
@@ -229,7 +236,7 @@ void DynamixelController::shape_goals(float* id0_deg, float* id1_deg)
         return;
     }
 
-    const float V = GRIPPER_MAX_DEG_PER_S, A = GRIPPER_MAX_DEG_PER_S2;
+    const float V = _sm_vmax, A = GRIPPER_MAX_DEG_PER_S2;
     float target[2] = { *id0_deg, *id1_deg };
     float lo[2] = { fminf(DXL_ID0_CLOSED_DEG, DXL_ID0_OPEN_DEG), fminf(DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG) };
     float hi[2] = { fmaxf(DXL_ID0_CLOSED_DEG, DXL_ID0_OPEN_DEG), fmaxf(DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG) };
@@ -271,6 +278,11 @@ bool DynamixelController::pose_guard(bool* engaged)
     bool may_engage = _torque_maybe_off || (now - _last_tx_ms) >= HEARTBEAT_SAFE_MS;
 
     if (may_engage) {
+        // Recently rejected: don't block on another strict check yet.
+        if ((long)(now - _engage_retry_ms) < 0) {
+            _last_blocked = true;
+            return false;
+        }
         // Torque may come on with this move: strict, blocking. Two tries,
         // since read_position drops glitch samples; an out-of-range reading
         // is re-read once before refusing.

@@ -137,6 +137,13 @@ public:
     // Round-trip time of the last asynchronous position request (ms).
     unsigned long feedback_latency_ms() const { return _fb_latency_ms; }
 
+    // Speed cap of the streamed-goal shaper (deg/s), clamped to
+    // (0, GRIPPER_MAX_DEG_PER_S]. Slow test moves lower it temporarily
+    // instead of changing the servos' own Profile Velocity, which would
+    // persist on the servos until they are power-cycled.
+    void  set_stream_speed_limit(float deg_per_s);
+    float stream_speed_limit() const { return _sm_vmax; }
+
 private:
     HardwareSerial* _serial;
 
@@ -166,6 +173,11 @@ private:
     bool          _last_blocked       = false;
     unsigned long _last_warn_ms       = 0;
     float         _sent0 = NAN, _sent1 = NAN;    // last streamed goal
+    // After a rejection, wait this long before trying to (re)engage again,
+    // so a finger left out of range can't make every control-loop pass block
+    // on the strict position check.
+    static constexpr unsigned long ENGAGE_BACKOFF_MS = 300;
+    unsigned long _engage_retry_ms    = 0;
 
     // ---- Asynchronous feedback ----------------------------------------------
     uint8_t       _rx_buf[sizeof(Dyn_Response_Packet)];
@@ -181,6 +193,7 @@ private:
 
     // ---- Goal shaper ----------------------------------------------------------
     bool          _sm_ready = false;
+    float         _sm_vmax  = GRIPPER_MAX_DEG_PER_S;
     float         _sm_pos[2] = { 0.0f, 0.0f };
     float         _sm_vel[2] = { 0.0f, 0.0f };
     unsigned long _sm_last_us = 0;
