@@ -71,13 +71,17 @@ STATS_RE = re.compile(
 NEWTONS_PER_C = 3.18
 
 # Fields of a "TMT,..." line, in order (see trigger_mapping() in CLI_Control.cpp).
-TMT_FIELDS = ["pos", "t", "id0", "id1", "sumL", "sumR", "c"] + [f"T{i + 1}" for i in range(N_TAC)]
+TMT_FIELDS = (["pos", "t", "id0", "id1", "sumL", "sumR", "c"] + [f"T{i + 1}" for i in range(N_TAC)]
+              + ["stm_cmd", "iq"])     # STM32-applied force and measured current (newer firmware)
+TMT_FIELDS_OLD = len(TMT_FIELDS) - 2   # older firmware lines lack the last two
+TMT_STREAM = ["pos", "t", "id0", "id1", "sumL", "sumR", "c", "stm_cmd", "iq"]
 CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
 
 # Plot panels: (key, title, [(series, label)], fixed y-range or None for auto)
 PANELS = [
     ("tactile", "Tactile (tared)", [(f"T{i + 1}", f"T{i + 1}") for i in range(N_TAC)], None),
-    ("force", "Haptic force c (right axis: N = c x 3.18)", [("c", "c")], (0.25, 1.05)),
+    ("force", "Haptic force (right axis: N = x 3.18)",
+     [("c", "c sent"), ("stm_cmd", "STM applied"), ("iq", "measured current")], (-0.05, 1.1)),
     ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
     ("gripper", "Gripper commanded", [("id1", "ID1 (left)"), ("id0", "ID0 (right)")], (-5, 185)),
 ]
@@ -93,6 +97,8 @@ SERIES_COLORS = {
     "id1": LEFT_COLORS[1],     # left finger's servo
     "id0": RIGHT_COLORS[1],    # right finger's servo
     "c": "#4cc38a",
+    "stm_cmd": "#e9c46a",
+    "iq": "#c77dff",
     "pos": "#d9d9d9",
 }
 
@@ -128,12 +134,14 @@ def parse_tmt(line):
     if not line.startswith("TMT,"):
         return None
     parts = line.split(",")[1:]
-    if len(parts) != len(TMT_FIELDS):
+    if len(parts) not in (len(TMT_FIELDS), TMT_FIELDS_OLD):
         return None
     try:
-        return dict(zip(TMT_FIELDS, (float(p) for p in parts)))
+        vals = [float(p) for p in parts]
     except ValueError:
         return None   # the column-header line
+    vals += [float("nan")] * (len(TMT_FIELDS) - len(vals))
+    return dict(zip(TMT_FIELDS, vals))
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +247,7 @@ class HebConsole(QtWidgets.QMainWindow):
         self.reader = None
 
         self.tac = Stream([f"T{i + 1}" for i in range(N_TAC)])
-        self.tmt = Stream(TMT_FIELDS[:7])          # pos, t, id0, id1, sumL, sumR, c
+        self.tmt = Stream(TMT_STREAM)
         self.t0 = None
         self.new_data = False
         self.rate_times = collections.deque(maxlen=MAX_RATE_HZ * 3)
@@ -445,7 +453,7 @@ class HebConsole(QtWidgets.QMainWindow):
                 p.setXLink(first)
             for j, (name, label) in enumerate(series):
                 color = SERIES_COLORS[name]
-                c = p.plot(pen=pg.mkPen(color, width=2), name=label)
+                c = p.plot(pen=pg.mkPen(color, width=2), name=label, connect="finite")
                 c.setClipToView(True)
                 c.setDownsampling(auto=True, method="peak")
                 self.curves[name] = c
@@ -736,7 +744,11 @@ class HebConsole(QtWidgets.QMainWindow):
             self.bar_plot.setYRange(lo - 0.1, hi + 0.1, padding=0)
         if self.tmt.t:
             c = self.tmt.series['c'][-1]
-            self.c_label.setText(f"c = {c:.3f}  ({c * NEWTONS_PER_C:.2f} N)")
+            applied = self.tmt.series['stm_cmd'][-1]
+            txt = f"c = {c:.3f} ({c * NEWTONS_PER_C:.2f} N)"
+            if applied == applied:   # not NaN (newer firmware)
+                txt += f"  applied {applied:.3f} ({applied * NEWTONS_PER_C:.2f} N)"
+            self.c_label.setText(txt)
 
     # ---- Recording ------------------------------------------------------------
     def toggle_record(self, on):

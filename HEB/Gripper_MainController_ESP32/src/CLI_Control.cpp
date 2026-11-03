@@ -174,7 +174,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                       TAC_FORCE_MIN, TAC_FORCE_MAX,
                       TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C, TAC_SUM_MAX);
         Serial.println("TMT commands: tare, v <hz> <amp>, e to exit.");
-        Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6");   // column header
+        Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6,stm_cmd,iq");   // column header
     }
     else
         Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
@@ -321,9 +321,18 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             ;   // rate-limited
         else if (tactile_force)
             // Machine-readable line for heb_console (see header line above).
-            Serial.printf("TMT,%.2f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+        {
+            // What the STM32 actually applies (after its limit ramp + LPF) and
+            // the measured motor current, from the same reply. Sign-flipped so
+            // they read in the same positive sense as c.
+            float stm_cmd, iq;
+            memcpy(&stm_cmd, &resp.motor_value,     sizeof(stm_cmd));
+            memcpy(&iq,      &resp.measured_torque, sizeof(iq));
+            Serial.printf("TMT,%.2f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                           pos_deg, t, id0_deg, id1_deg, sumL, sumR, c_mag,
-                          tac[0], tac[1], tac[2], tac[3], tac[4], tac[5]);
+                          tac[0], tac[1], tac[2], tac[3], tac[4], tac[5],
+                          -stm_cmd, -iq);
+        }
         else
             Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
                           pos_deg, t, id0_deg, id1_deg, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
