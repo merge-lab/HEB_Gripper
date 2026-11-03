@@ -25,36 +25,46 @@
 //   ID 1 = physical LEFT  finger  -> sent in the packet's right_* fields
 // Driver arguments below are therefore named by ID, not by side.
 //
-// Goal ranges in the same degree convention as goal positions. Every goal the
-// ESP32 sends is clamped to these ranges inside the driver.
+// Allowed ranges, in the same degree convention as goal positions.
 //
 // Measured by hand with 'gpos' (torque off), 2026-11-02:
 //   ID 0: closed 436 deg (= 76.07), open 341 deg (= -19)
 //   ID 1: closed 91.67,             open 184.92
-// Chosen: the original mapping's values, 90 deg of travel on each servo:
-//   ID 0: closed 90 -> open 0     ID 1: closed 90 -> open 180
-// Note ID 0's closed goal (90) is ~14 deg past its measured closed pose
-// (76), so at closed it presses into the other finger / stop. If it trips
-// overload protection (servo stops responding, LED blinks), lower this.
-const float DXL_ID0_CLOSED_DEG = 90.0f;     // physical right finger
-const float DXL_ID0_OPEN_DEG   = 0.0f;
-const float DXL_ID1_CLOSED_DEG = 90.0f;     // physical left finger
-const float DXL_ID1_OPEN_DEG   = 180.0f;
+// Chosen (2026-11-02), kept well inside the mechanical stops:
+//   ID 0: closed 60  -> open 1        ID 1: closed 120 -> open 179
+// The physical closed pose (ID 0 ~76, ID 1 ~92) is OUTSIDE these ranges on
+// purpose, so a gripper resting fully closed must be opened by hand into
+// range before the servos will engage.
+//
+// RULE (enforced in the driver): if a commanded goal is outside its range,
+// or either servo's present position is outside its range (+/- the pose
+// tolerance), the move is rejected and both servos are relaxed (torque off).
+// No clamping: out-of-range input is treated as an error, not corrected.
+const float DXL_ID0_CLOSED_DEG = 60.0f;     // physical right finger
+const float DXL_ID0_OPEN_DEG   = 1.0f;
+const float DXL_ID1_CLOSED_DEG = 120.0f;    // physical left finger
+const float DXL_ID1_OPEN_DEG   = 179.0f;
+// Slack on the *present position* check only (not on commands), so normal
+// settling/overshoot near an end (e.g. 0.8 deg for a 1 deg goal) is accepted.
+const float DXL_POSE_TOL_DEG   = 3.0f;
 
 // SAFETY: every servo motion must go through move_servo(), move_servo_fast()
-// or move_servo_log(). Those are the only places that apply the range clamp
-// and the ID 0 wrap guard. Never write Dyn_Command_Packet bytes to the
-// gripper serial port directly, and don't add a new move path without
-// calling clamp_to_range() and engage_check() first.
+// or move_servo_log(). Those are the only places that enforce the range rule
+// above. Never write Dyn_Command_Packet bytes to the gripper serial port
+// directly, and don't add a new move path that skips these checks.
 class DynamixelController
 {
 public:
-    // Clamp goal positions (deg) to each servo's measured range.
-    // Returns true if either value had to be changed.
-    static bool clamp_to_range(float* id0_deg, float* id1_deg);
+    // True if both goals are inside their allowed ranges (inclusive).
+    static bool command_in_range(float id0_deg, float id1_deg);
+
+    // True if both present positions are inside their allowed ranges,
+    // widened by DXL_POSE_TOL_DEG.
+    static bool pose_in_range(float id0_deg, float id1_deg);
 
     // Map gripper opening g (0 = closed, 1 = fully open, clamped) to goal
-    // positions for both servos, linearly between the measured limits.
+    // positions for both servos, linearly between the range ends. Results
+    // are always in range.
     static void opening_to_goals(float g, float* id0_deg, float* id1_deg);
 
     DynamixelController(HardwareSerial* serial) : _serial(serial) {}
@@ -63,8 +73,9 @@ public:
     // Default baud (1,000,000) must match ESP_BAUD on the Mega side.
     void begin(long baud = 1000000, int rx_pin = 35, int tx_pin = 21);
 
-    // Send a MOVE_SERVO command. Degrees are absolute goal positions (clamped
-    // to range); speed is in RPM (0 = maximum speed). Blocks up to timeout_ms
+    // Send a MOVE_SERVO command. Degrees are absolute goal positions; speed is
+    // in RPM (0 = maximum speed). Subject to the range rule: out-of-range goal
+    // or pose -> rejected, servos relaxed, returns false. Blocks up to timeout_ms
     // for a response when response != nullptr; fire-and-forget when nullptr.
     // Returns true if ACK received (or nullptr passed).
     bool move_servo(float id0_deg, float id1_deg,
@@ -72,14 +83,14 @@ public:
                     Dyn_Response_Packet* response = nullptr,
                     unsigned long timeout_ms = 200);
 
-    // Move servos (clamped to range) without waiting for a response. Use this
-    // in tight control loops.
+    // Move servos without waiting for a response. Use this in tight control
+    // loops. Subject to the range rule (pose re-checked every 100 ms).
     void move_servo_fast(float id0_deg, float id1_deg);
 
     // Send a MOVE_SERVO_LOG command: same as move_servo(), but the Arduino
     // skips its current-draw readback (response only carries position).
     // Lower latency than move_servo() for callers that don't need current —
-    // used by trigger_mapping_log()/response_plot.py. Goals are clamped.
+    // used by trigger_mapping_log()/response_plot.py. Subject to the range rule.
     bool move_servo_log(float id0_deg, float id1_deg,
                         Dyn_Response_Packet* response,
                         unsigned long timeout_ms = 200);
@@ -97,26 +108,36 @@ public:
     bool read_position(float* id0_deg, float* id1_deg,
                        unsigned long timeout_ms = 200);
 
-    // True if the most recent move_* call was refused by the wrap guard
-    // (see engage_check) rather than sent.
+    // True if the most recent move_* call was rejected by the range rule
+    // (servos were relaxed).
     bool last_move_blocked() const { return _last_blocked; }
+
+    // For callers that read positions themselves while torque is on (e.g. a
+    // watched move): if the pose is out of range, relax the servos, print
+    // why, and return false. Glitch samples should be filtered by the caller
+    // (read_position already does).
+    bool check_pose_or_relax(float id0_deg, float id1_deg);
 
 private:
     HardwareSerial* _serial;
 
-    // ---- Wrap guard -------------------------------------------------------
-    // ID 0's range sits right next to 0/360. If it is below 0 (e.g. -10)
-    // when torque comes on, the servo treats it as ~350 and drives the long
-    // way (negative direction) into its open stop. The Mega turns torque on
-    // at the first move after a STOP or after its 500 ms heartbeat expires,
-    // so before any move that may re-enable torque, read positions and
-    // refuse unless ID 0 is within [0, 100] deg.
+    // ---- Range guard ------------------------------------------------------
+    // Pose is checked (via PING, which carries positions) before any move
+    // that may re-enable torque -- the Mega turns torque on at the first move
+    // after a STOP or after its 500 ms heartbeat expires -- and at least every
+    // POSE_CHECK_MS while moving. This also covers ID 0's 0/360 wrap: if it
+    // were below 0 (reads ~350) or a turn off (reads ~436), it is out of
+    // range and nothing moves.
     static constexpr unsigned long HEARTBEAT_SAFE_MS = 400;  // < Mega's 500
-    unsigned long _last_tx_ms       = 0;
-    bool          _torque_maybe_off = true;   // true at boot / after STOP
-    bool          _last_blocked     = false;
-    unsigned long _last_warn_ms     = 0;
-    bool engage_check();
+    static constexpr unsigned long POSE_CHECK_MS     = 100;
+    unsigned long _last_tx_ms         = 0;
+    unsigned long _last_pose_check_ms = 0;
+    bool          _torque_maybe_off   = true;   // true at boot / after STOP
+    bool          _last_blocked       = false;
+    unsigned long _last_warn_ms       = 0;
+
+    bool pose_guard();                          // true = OK to send a move
+    void reject_and_relax(const char* why, bool have_pose, float p0, float p1);
 
     // Transmit a command packet and optionally wait for a response.
     bool send_command(const Dyn_Command_Packet& packet,

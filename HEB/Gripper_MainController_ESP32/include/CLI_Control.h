@@ -39,7 +39,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
 // 'r' resets min/max, 'e' exits and prints the final range.
 void gripper_position_mode(DynamixelController* gripper);
 
-// Slow, watched test move: moves to the (clamped) goals at rpm, polls and
+// Slow, watched test move: moves to the goals (rejected if out of range) at rpm, polls and
 // prints actual vs goal every 100 ms until settled or 20 s. 'e' stops.
 // Note: the speed persists on the servos for later moves (e.g. tm) until
 // the servos are power-cycled.
@@ -60,7 +60,7 @@ Haptic motor:
   stop         relax: zero all force (also: x / relax)
 
 Gripper (Dynamixel):
-  m <id0> <id1>        move ID0 (phys. right) / ID1 (phys. left), clamped to range
+  m <id0> <id1>        move ID0 (phys. right) / ID1 (phys. left); out of range = rejected + relaxed
   m <id0> <id1> <spd>  same, at spd RPM
   mw <id0> <id1> [rpm] slow watched move (default 5 rpm), prints actual vs goal
   gstop              torque off both servos

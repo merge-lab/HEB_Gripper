@@ -477,10 +477,15 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
         return;
     }
 
-    if (DynamixelController::clamp_to_range(&id0_deg, &id1_deg))
-        Serial.printf("[MW] clamped to range: ID0 %.1f..%.1f, ID1 %.1f..%.1f\n",
+    // Out-of-range goals are rejected (and the servos relaxed) by the driver;
+    // check here too so we can say so before touching anything.
+    if (!DynamixelController::command_in_range(id0_deg, id1_deg)) {
+        Serial.printf("[MW] REJECTED: goal out of range. Allowed ID0 %.0f..%.0f, ID1 %.0f..%.0f\n",
                       DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
                       DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
+        gripper->stop(nullptr);
+        return;
+    }
 
     float p0 = NAN, p1 = NAN;
     if (!gripper->read_position(&p0, &p1, 200)) {
@@ -502,7 +507,7 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
         bool got = gripper->move_servo(id0_deg, id1_deg, rpm, rpm, &resp, 1000);
         if (gripper->last_move_blocked()) {
             // Guard already printed why; nothing was sent, torque untouched.
-            Serial.println("[MW] not moving (wrap guard).");
+            Serial.println("[MW] not moving (range guard relaxed the servos).");
             return;
         }
         if (got && resp.response == DYN_ACK) {
@@ -549,6 +554,10 @@ void gripper_move_watch(DynamixelController* gripper, float id0_deg, float id1_d
             p0 = n0; p1 = n1;
             Serial.printf("[MW] actual ID0=%7.2f (err %+6.2f)  ID1=%7.2f (err %+6.2f)\n",
                           p0, p0 - id0_deg, p1, p1 - id1_deg);
+            if (!gripper->check_pose_or_relax(p0, p1)) {
+                Serial.println("[MW] aborted: a servo left its allowed range.");
+                return;
+            }
             bool at_goal = fabsf(p0 - id0_deg) < 1.0f && fabsf(p1 - id1_deg) < 1.0f;
             if (at_goal) break;
             bool still = fabsf(p0 - last0) < 0.2f && fabsf(p1 - last1) < 0.2f;
@@ -740,15 +749,12 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
                 float l_deg = arg.toFloat();
                 float r_deg = (sp1 >= 0) ? arg.substring(sp1 + 1).toFloat() : l_deg;
                 float spd   = (sp2 >= 0) ? arg.substring(sp2 + 1).toFloat() : 0.0f;
-                // move_servo() clamps too; clamp here first so we can report it.
-                if (DynamixelController::clamp_to_range(&l_deg, &r_deg))
-                    Serial.printf("clamped to range: ID0 %.1f..%.1f, ID1 %.1f..%.1f\n",
-                                  DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
-                                  DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
                 Dyn_Response_Packet resp = {};
                 bool ok = gripper->move_servo(l_deg, r_deg, spd, spd, &resp);
                 if (gripper->last_move_blocked()) {
-                    Serial.println("move not sent (wrap guard)");
+                    Serial.printf("move REJECTED, servos relaxed. Allowed ID0 %.0f..%.0f, ID1 %.0f..%.0f\n",
+                                  DXL_ID0_OPEN_DEG, DXL_ID0_CLOSED_DEG,
+                                  DXL_ID1_CLOSED_DEG, DXL_ID1_OPEN_DEG);
                     return;
                 }
                 float lmA, rmA;
