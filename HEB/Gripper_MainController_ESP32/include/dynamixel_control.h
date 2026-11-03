@@ -130,6 +130,12 @@ private:
     // range and nothing moves.
     static constexpr unsigned long HEARTBEAT_SAFE_MS = 400;  // < Mega's 500
     static constexpr unsigned long POSE_CHECK_MS     = 100;
+    // Periodic (already-moving) checks use one short try; a missed reply is
+    // retried next loop and only POSE_MAX_MISSES in a row relaxes. Checks
+    // before a possible re-engage stay strict (2 tries x 200 ms).
+    static constexpr unsigned long POSE_POLL_TIMEOUT_MS = 15;
+    static constexpr int           POSE_MAX_MISSES      = 5;
+    int           _pose_misses        = 0;
     unsigned long _last_tx_ms         = 0;
     unsigned long _last_pose_check_ms = 0;
     bool          _torque_maybe_off   = true;   // true at boot / after STOP

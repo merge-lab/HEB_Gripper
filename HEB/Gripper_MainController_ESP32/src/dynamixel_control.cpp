@@ -152,12 +152,26 @@ bool DynamixelController::pose_guard()
     if (!may_engage && !due)
         return true;
 
-    // Two tries, since read_position drops glitch samples.
     float p0 = 0.0f, p1 = 0.0f;
-    if (!(read_position(&p0, &p1, 200) || read_position(&p0, &p1, 200))) {
-        reject_and_relax("could not read servo positions", false, 0.0f, 0.0f);
-        return false;
+    if (may_engage) {
+        // Torque may come on with this move: strict. Two tries, since
+        // read_position drops glitch samples.
+        if (!(read_position(&p0, &p1, 200) || read_position(&p0, &p1, 200))) {
+            reject_and_relax("could not read servo positions", false, 0.0f, 0.0f);
+            return false;
+        }
+    } else if (!read_position(&p0, &p1, POSE_POLL_TIMEOUT_MS)) {
+        // Already moving with a recent good check: one dropped reply isn't a
+        // reason to drop the gripper. Retry on the next loop (the check time
+        // isn't advanced) and give up only after several misses in a row.
+        if (++_pose_misses >= POSE_MAX_MISSES) {
+            _pose_misses = 0;
+            reject_and_relax("lost servo position feedback (5 missed reads in a row)", false, 0.0f, 0.0f);
+            return false;
+        }
+        return true;
     }
+    _pose_misses = 0;
     _last_pose_check_ms = millis();
     return check_pose_or_relax(p0, p1);
 }

@@ -103,12 +103,18 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     }
     else
     {
-        // Fallback: read current encoder position with trigger fully closed.
+        // Fallback: read the encoder with the trigger at rest (released).
         Response_Packet init_resp;
         while (!motor->relax(&init_resp))
             delay(200);
-        memcpy(&POS_CLOSE, &init_resp.encoder_value, sizeof(POS_CLOSE));
-        POS_OPEN = POS_CLOSE - 47.0f;
+        // The trigger rests at the HIGH end of its travel and pulling it
+        // lowers the encoder (same as the calibrated limits: rest = t 1 =
+        // gripper open, fully pulled = t 0 = closed). Place the 47 deg range
+        // below the rest reading so t = (pos - POS_CLOSE) / 47.
+        float rest_pos;
+        memcpy(&rest_pos, &init_resp.encoder_value, sizeof(rest_pos));
+        POS_CLOSE = rest_pos - 47.0f;
+        POS_OPEN  = POS_CLOSE - 47.0f;   // keeps the shared t formula below
         Serial.printf("Trigger mapping ON (uncalibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
                       POS_CLOSE, POS_OPEN);
     }
@@ -272,7 +278,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
 
-        // t = 0 (trigger at rest) -> gripper closed, t = 1 -> fully open.
+        // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
         DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
         if (gripper)
@@ -346,8 +352,14 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
         Response_Packet init_resp;
         while (!motor->relax(&init_resp))
             delay(200);
-        memcpy(&POS_CLOSE, &init_resp.encoder_value, sizeof(POS_CLOSE));
-        POS_OPEN = POS_CLOSE - 47.0f;
+        // The trigger rests at the HIGH end of its travel and pulling it
+        // lowers the encoder (same as the calibrated limits: rest = t 1 =
+        // gripper open, fully pulled = t 0 = closed). Place the 47 deg range
+        // below the rest reading so t = (pos - POS_CLOSE) / 47.
+        float rest_pos;
+        memcpy(&rest_pos, &init_resp.encoder_value, sizeof(rest_pos));
+        POS_CLOSE = rest_pos - 47.0f;
+        POS_OPEN  = POS_CLOSE - 47.0f;   // keeps the shared t formula below
         Serial.printf("Trigger mapping (logged) ON (uncalibrated): close=%.2f open=%.2f. Type 'e' + Enter to exit.\n",
                       POS_CLOSE, POS_OPEN);
     }
@@ -386,7 +398,7 @@ void trigger_mapping_log(HapticMotorController* motor, DynamixelController* grip
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
 
-        // t = 0 (trigger at rest) -> gripper closed, t = 1 -> fully open.
+        // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
         DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
         float actual_id0_deg = 0.0f, actual_id1_deg = 0.0f;
@@ -450,8 +462,12 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
                     Response_Packet cal_resp;
                     while (!motor->relax(&cal_resp))
                         delay(200);
-                    memcpy(&POS_CLOSE, &cal_resp.encoder_value, sizeof(POS_CLOSE));
-                    POS_OPEN = POS_CLOSE - TRIGGER_RANGE;
+                    // Trigger rests at the high end; pulling lowers the encoder
+                    // (see trigger_mapping). Range sits below the rest reading.
+                    float rest_pos;
+                    memcpy(&rest_pos, &cal_resp.encoder_value, sizeof(rest_pos));
+                    POS_CLOSE = rest_pos - TRIGGER_RANGE;
+                    POS_OPEN  = POS_CLOSE - TRIGGER_RANGE;
                     Serial.printf("DXL ON: close=%.2f open=%.2f\n", POS_CLOSE, POS_OPEN);
                 }
                 else
@@ -493,7 +509,7 @@ void haptic_update_mode(HapticMotorController* motor, DynamixelController* gripp
             if (t < 0.0f) t = 0.0f;
             if (t > 1.0f) t = 1.0f;
 
-            // t = 0 (trigger at rest) -> gripper closed, t = 1 -> fully open.
+            // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
 
             float id0_deg, id1_deg;
 
