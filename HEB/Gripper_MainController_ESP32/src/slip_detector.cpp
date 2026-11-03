@@ -18,7 +18,7 @@ SlipStats    stats;
 
 void detector_task(void*)
 {
-    static float batch[32][TACTILE_COUNT];
+    static float batch[64][TACTILE_COUNT];
     uint32_t cursor  = tactile_sample_count();
     uint32_t dropped = 0;
 
@@ -33,7 +33,7 @@ void detector_task(void*)
         cfg = config;
         portEXIT_CRITICAL(&mux);
 
-        const int n = tactile_read_new(&cursor, batch, 32, /*tared=*/false, &dropped);
+        const int n = tactile_read_new(&cursor, batch, 64, /*tared=*/false, &dropped);
         for (int k = 0; k < n; k++) {
             SlipResult r;
             const int64_t t0 = esp_timer_get_time();
@@ -70,7 +70,11 @@ void detector_task(void*)
             win_updates = 0;
         }
 
-        if (n == 0) vTaskDelay(1);     // ~2 new samples per ms at 2 kHz
+        // Always yield one tick, even with samples still waiting: otherwise
+        // this task never blocks (new samples arrive every 0.5 ms), core 0's
+        // idle task starves and the task watchdog reboots the chip. The ring
+        // buffer holds ~0.5 s, so the next pass simply takes a bigger batch.
+        vTaskDelay(1);
     }
 }
 

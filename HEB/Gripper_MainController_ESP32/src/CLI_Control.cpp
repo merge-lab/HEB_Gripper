@@ -864,7 +864,7 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, in
             print_slip_line();
         }
 
-        if (n == 0) delay(1);            // ~2 new samples per ms at 2 kHz
+        delay(1);                        // always yield; ~2 new samples per ms at 2 kHz
     }
 }
 
