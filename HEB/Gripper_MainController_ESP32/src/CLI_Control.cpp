@@ -1,5 +1,6 @@
 #include "CLI_Control.h"
 #include "tactile_sensors.h"
+#include "slip_detector.h"
 #include <esp_timer.h>
 #include <math.h>
 
@@ -67,6 +68,56 @@ void force_ramp_up(HapticMotorController* motor) {
 
   motor->relax(NULL);
   Serial.println("RAMP UP complete - relaxed");
+}
+
+// ---- Slip detection: commands and status output --------------------------------
+// Accepted in idle, tac and tmt:  slip_thr <v>   slip_gate <v>   slip?
+// Every change is confirmed with a machine-readable "SLIPCFG,<thr>,<gate>".
+
+static void print_slip_config()
+{
+    const SlipConfig c = slip_config();
+    Serial.printf("SLIPCFG,%.3f,%.3f\n", c.threshold, c.contact_gate);
+}
+
+static bool handle_slip_command(String line)
+{
+    line.trim();
+    if (line.equalsIgnoreCase("slip?")) {
+        print_slip_config();
+        const SlipStats st = slip_stats();
+        Serial.printf("[SLIP] %.0f updates/s, %.0f us per update (max %.0f), core-0 load %.1f%%, "
+                      "%lu samples dropped\n",
+                      st.updates_per_s, st.update_us_avg, st.update_us_max,
+                      st.core0_load_pct, (unsigned long)st.dropped);
+        return true;
+    }
+    const bool is_thr  = line.startsWith("slip_thr ");
+    const bool is_gate = line.startsWith("slip_gate ");
+    if (!is_thr && !is_gate)
+        return false;
+
+    const char* arg = line.c_str() + line.indexOf(' ') + 1;
+    char* end = nullptr;
+    const float v = strtof(arg, &end);
+    if (end == arg || !(v >= 0.0f) || v > 1000.0f) {
+        Serial.println("[SLIP] usage: slip_thr <0..1000>  |  slip_gate <0..1000>");
+        return true;
+    }
+    SlipConfig c = slip_config();
+    (is_thr ? c.threshold : c.contact_gate) = v;
+    slip_set_config(c);
+    print_slip_config();
+    return true;
+}
+
+// One "SLIP,<avgL>,<avgR>,<slip>" line; slip = 1 if any slip result occurred
+// since the previous line (so short events are never missed between lines).
+static void print_slip_line()
+{
+    SlipStatus st;
+    slip_take(&st);
+    Serial.printf("SLIP,%.3f,%.3f,%d\n", st.result.avgL, st.result.avgR, st.slip_since_last ? 1 : 0);
 }
 
 // Tactile -> haptic force (tmt mode). Each finger's three tared channels
@@ -173,7 +224,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         Serial.printf("[TMT] c = %.2f..%.2f (%.2f..%.2f N) from max(T1+T2+T3, T4+T5+T6) over 0..%.0f.\n",
                       TAC_FORCE_MIN, TAC_FORCE_MAX,
                       TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C, TAC_SUM_MAX);
-        Serial.println("TMT commands: tare, v <hz> <amp>, e to exit.");
+        Serial.println("TMT commands: tare, v <hz> <amp>, slip_thr <v>, slip_gate <v>, slip?, e to exit.");
         Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6,stm_cmd,iq");   // column header
     }
     else
@@ -234,6 +285,8 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                 Serial.println(tactile_tare() ? "[TM] tactile tared." : "[TM] tare failed (no samples yet).");
                 continue;
             }
+            if (handle_slip_command(line))
+                continue;
 
             String arg = line.substring(1);
             char extra;
@@ -334,6 +387,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                           pos_deg, t, id0_deg, id1_deg, sumL, sumR, c_mag,
                           tac[0], tac[1], tac[2], tac[3], tac[4], tac[5],
                           -stm_cmd, -iq);
+            print_slip_line();
         }
         else
             Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",
@@ -349,15 +403,18 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             unsigned long fb_age = 0;
             bool have_fb = gripper && gripper->latest_feedback(nullptr, nullptr, &fb_age);
             unsigned long bad_now = gripper ? gripper->bad_reply_count() : 0;
+            const SlipStats sst = slip_stats();
             Serial.printf("[%s] loop %.0f Hz, haptic exchange avg %.2f ms / max %.2f ms, "
-                          "gripper feedback latency %lu ms, age %ld ms, mega bad replies %lu\n",
+                          "gripper feedback latency %lu ms, age %ld ms, mega bad replies %lu, "
+                          "slip %.0f/s %.0f us core0 %.0f%%\n",
                           tactile_force ? "TMT" : "TM",
                           stats_loops * 1000.0f / stats_ms,
                           stats_haptic_us / 1000.0f / stats_loops,
                           stats_haptic_max_us / 1000.0f,
                           gripper ? gripper->feedback_latency_ms() : 0UL,
                           have_fb ? (long)fb_age : -1L,
-                          bad_now - stats_bad0);
+                          bad_now - stats_bad0,
+                          sst.updates_per_s, sst.update_us_avg, sst.core0_load_pct);
             stats_bad0 = bad_now;
             stats_start_ms = millis();
             stats_loops = stats_haptic_us = stats_haptic_max_us = 0;
@@ -749,9 +806,11 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, in
                   actual_hz, tactile_mode_name(),
                   decim == 1 ? "every sample" : "block average per line");
     Serial.println("Haptic relaxed, gripper torque off. 'tare' re-zeroes, 'e' + Enter exits.");
+    print_slip_config();
 
     const int LINE_BYTES = 64;           // one "T1:...,T6:..." line, rounded up
-    char  cmd[16];
+    unsigned long last_slip_ms = millis();
+    char  cmd[32];
     int   cmd_len = 0;
     unsigned long lines = 0, usb_skipped = 0;
     uint32_t dropped = 0;
@@ -769,6 +828,8 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, in
                 cmd[cmd_len] = '\0';
                 if (cmd_len == 4 && strncasecmp(cmd, "tare", 4) == 0) {
                     Serial.println(tactile_tare() ? "Tactile tared." : "Tare failed (no samples yet).");
+                } else if (cmd_len > 0) {
+                    handle_slip_command(String(cmd));
                 }
                 if (cmd_len == 1 && (cmd[0] == 'e' || cmd[0] == 'E')) {
                     Serial.printf("Tactile mode OFF. %lu lines, %lu samples dropped (reader behind), "
@@ -797,6 +858,12 @@ void tactile_mode(HapticMotorController* motor, DynamixelController* gripper, in
                           m[0], m[1], m[2], m[3], m[4], m[5]);
             lines++;
         }
+        // Slip status at 100 Hz, whatever the tactile line rate.
+        if (millis() - last_slip_ms >= 10 && Serial.availableForWrite() >= LINE_BYTES) {
+            last_slip_ms = millis();
+            print_slip_line();
+        }
+
         if (n == 0) delay(1);            // ~2 new samples per ms at 2 kHz
     }
 }
@@ -832,6 +899,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
     Serial.println("Gripper: m <id0> <id1> [spd]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac [hz] (tactile stream, 100 default, 2000 max)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
+    Serial.println("Slip:    slip_thr <v>   slip_gate <v>   slip?   (FORTE detector, on-board at 2 kHz)");
     Serial.println("Boots relaxed - send a command to engage.");
 }
 
@@ -883,6 +951,9 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
         }
         else if (line.equalsIgnoreCase("tare")) {
             Serial.println(tactile_tare() ? "Tactile tared." : "Tare failed (no samples yet).");
+        }
+        else if (handle_slip_command(line)) {
+            // slip_thr / slip_gate / slip? handled
         }
         else if (line.equalsIgnoreCase("tac") || line.startsWith("tac ") || line.startsWith("TAC ")) {
             // tac [hz]: 100 Hz default; 'tac 2000' streams every sample.

@@ -78,6 +78,14 @@ Gripper (Dynamixel):
   gstop              torque off both servos
   gping              ping the Arduino gripper board
   gpos               torque off + stream positions (find range of motion)
+
+Tactile / slip (FORTE detector runs on-board at 2 kHz, see slip_core.h):
+  tac [hz]           stream T1..T6 (100 Hz default, 2000 = every sample) + SLIP lines
+  tmt                trigger map + tactile-driven force (+ SLIP lines)
+  tare               re-zero the tactile sensors (any mode)
+  slip_thr <v>       slip threshold (FORTE slip_var_threshold, default 2)
+  slip_gate <v>      contact gate (both fingers must reach it, default 0.6)
+  slip?              print SLIPCFG,<thr>,<gate> and detector load
 */
 void CLI(HapticMotorController* motor, DynamixelController* gripper = nullptr);
 
