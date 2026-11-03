@@ -57,11 +57,24 @@ CSV_FIELDS = ["t_s", "mode"] + TMT_FIELDS
 # Plot panels: (key, title, [(series, label)], fixed y-range or None for auto)
 PANELS = [
     ("tactile", "Tactile (tared)", [(f"T{i + 1}", f"T{i + 1}") for i in range(N_TAC)], None),
-    ("sums", "Side sums (clamped 0..3)", [("sumL", "Left T1+T2+T3"), ("sumR", "Right T4+T5+T6")], (-0.1, 3.2)),
     ("force", "Haptic force c", [("c", "c")], (0.25, 1.05)),
     ("trigger", "Trigger encoder", [("pos", "pos (deg)")], None),
-    ("gripper", "Gripper commanded", [("id0", "ID0 (right)"), ("id1", "ID1 (left)")], (-5, 185)),
+    ("gripper", "Gripper commanded", [("id1", "ID1 (left)"), ("id0", "ID0 (right)")], (-5, 185)),
 ]
+
+# One colour family per finger, dark -> light within a finger:
+#   left finger  (T1..T3, servo ID 1): blues
+#   right finger (T4..T6, servo ID 0): oranges
+LEFT_COLORS = ["#2f6fdf", "#5b9cf6", "#9cc4fb"]
+RIGHT_COLORS = ["#e2590f", "#f98b3c", "#fcbc85"]
+SERIES_COLORS = {
+    **{f"T{i + 1}": c for i, c in enumerate(LEFT_COLORS)},
+    **{f"T{i + 4}": c for i, c in enumerate(RIGHT_COLORS)},
+    "id1": LEFT_COLORS[1],     # left finger's servo
+    "id0": RIGHT_COLORS[1],    # right finger's servo
+    "c": "#4cc38a",
+    "pos": "#d9d9d9",
+}
 
 
 def parse_tactile(line):
@@ -341,7 +354,7 @@ class HebConsole(QtWidgets.QMainWindow):
         vis.addStretch(1)
         rl.addLayout(vis)
 
-        self.colors = [pg.intColor(i, hues=N_TAC) for i in range(N_TAC)]
+        self.colors = [pg.mkColor(SERIES_COLORS[f"T{i + 1}"]) for i in range(N_TAC)]
         chan_row = QtWidgets.QHBoxLayout()
         self.value_labels = []
         self.chan_cbs = []
@@ -365,7 +378,6 @@ class HebConsole(QtWidgets.QMainWindow):
         rl.addWidget(self.glw, 1)
         self.plots = {}
         self.curves = {}
-        extra_colors = ["#e76f51", "#2a9d8f", "#f4a261", "#264653"]
         first = None
         for row, (key, title, series, yr) in enumerate(PANELS):
             p = self.glw.addPlot(row=row, col=0, title=title)
@@ -381,7 +393,7 @@ class HebConsole(QtWidgets.QMainWindow):
             else:
                 p.setXLink(first)
             for j, (name, label) in enumerate(series):
-                color = self.colors[int(name[1:]) - 1] if key == "tactile" else extra_colors[j % len(extra_colors)]
+                color = SERIES_COLORS[name]
                 c = p.plot(pen=pg.mkPen(color, width=2), name=label)
                 c.setClipToView(True)
                 c.setDownsampling(auto=True, method="peak")
