@@ -20,6 +20,7 @@ import collections
 import csv
 import datetime
 import os
+import re
 import sys
 import time
 
@@ -60,6 +61,11 @@ ALERT_PREFIXES = (
     "gripper no PONG", "haptic no PONG",
     "Calibration FAILED",
 )
+
+# Once-per-second timing line from tm/tmt (see trigger_mapping()).
+STATS_RE = re.compile(
+    r"^\[(?:TMT|TM)\] loop (?P<hz>\d+) Hz, haptic exchange avg (?P<hap>[\d.]+) ms / max (?P<hapmax>[\d.]+) ms, "
+    r"gripper feedback latency (?P<lat>\d+) ms, age (?P<age>-?\d+) ms(?:, mega bad replies (?P<bad>\d+))?")
 
 # Haptic trigger force: c (command units) x 3.18 = Newtons at the trigger.
 NEWTONS_PER_C = 3.18
@@ -352,7 +358,9 @@ class HebConsole(QtWidgets.QMainWindow):
         self.record_btn = QtWidgets.QPushButton("Record CSV")
         self.record_btn.setCheckable(True)
         self.record_btn.toggled.connect(self.toggle_record)
-        for w in (self.mode_label, self.hz_label, self.c_label):
+        self.esp_label = QtWidgets.QLabel("")
+        self.esp_label.setToolTip("From the ESP32's once-per-second timing line (tm/tmt)")
+        for w in (self.mode_label, self.hz_label, self.c_label, self.esp_label):
             ctl.addWidget(w)
             ctl.addSpacing(12)
         ctl.addStretch(1)
@@ -578,6 +586,12 @@ class HebConsole(QtWidgets.QMainWindow):
                 continue
             if line.startswith("TMT,pos"):
                 continue                     # column header, not useful in the console
+            m = STATS_RE.match(line)
+            if m:
+                self.show_esp_stats(m)
+                if show_data:
+                    text_lines.append(line)
+                continue
             text_lines.append(line)
             if line.startswith(ALERT_PREFIXES):
                 self.show_alert(line)
@@ -629,6 +643,15 @@ class HebConsole(QtWidgets.QMainWindow):
     def log_local(self, msg):
         self.append_console([f"-- {msg}"])
 
+    def show_esp_stats(self, m):
+        bad = int(m.group("bad") or 0)
+        age = int(m.group("age"))
+        txt = (f"ESP {m.group('hz')} Hz | haptic {float(m.group('hap')):.1f} ms | "
+               f"gripper fb {m.group('lat')} ms, age {age} ms | Mega bad {bad}/s")
+        warn = bad > 0 or age < 0 or age > 300
+        self.esp_label.setText(txt)
+        self.esp_label.setStyleSheet("color: #e2590f; font-weight: bold;" if warn else "color: #888;")
+
     def show_alert(self, text):
         # Same message repeating (e.g. the guard at 1 Hz): count, don't spam.
         if text == self.alert_text:
@@ -665,6 +688,7 @@ class HebConsole(QtWidgets.QMainWindow):
             self.mode_label.setStyleSheet("font-weight: bold;")
             self.hz_label.setText("-- Hz")
             self.c_label.setText("c = --")
+            self.esp_label.setText("")
 
     # ---- Plotting -------------------------------------------------------------
     def redraw(self):
