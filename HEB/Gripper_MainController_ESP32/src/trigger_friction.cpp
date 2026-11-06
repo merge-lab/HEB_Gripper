@@ -145,16 +145,16 @@ private:
             if (rec_dir >= 0 && s1_.valid && s2_.valid) {
                 const float dt = (uint32_t)(t_prev_ - s2_.t) * 1e-6f;
                 const float vc = dt > 0.0f ? dir * (pos_ - s2_.pos) / dt : 0.0f;
-                if (vc > 2.0f && fabsf(s1_.pos - start) > 2.0f) {
+                if (vc > 0.5f && fabsf(s1_.pos - start) > 1.0f) {
                     const int b = (int)((open_ - s1_.pos) / bin_w_);
                     if (b >= 0 && b < n_bins_) acc_[rec_dir][b].add(vc, dir * s1_.force);
                 }
             }
             s2_ = s1_;
             s1_ = { pos_, force_, t_prev_, true };
-            if (v < 1.0f) {
+            if (v < 0.5f) {
                 if (still_since == 0) still_since = io_.now_us();
-                else if (elapsed_s(still_since) > 0.4f) {
+                else if (elapsed_s(still_since) > 0.6f) {
                     if (!hold(0.0f, 0.15f)) return FAILED;
                     return STALLED;
                 }
@@ -199,7 +199,8 @@ bool Runner::run(FrictionMap* out)
         say("[FID] travel %.1f deg is too short (closed %.1f, release %.1f).", travel, close_, open_);
         return false;
     }
-    bin_w_  = travel / FrictionMap::MAX_BINS > 1.0f ? travel / FrictionMap::MAX_BINS : 1.0f;
+    bin_w_  = travel / FrictionMap::MAX_BINS;
+    if (bin_w_ < 0.5f) bin_w_ = 0.5f;
     n_bins_ = (int)ceilf(travel / bin_w_);
     if (n_bins_ > FrictionMap::MAX_BINS) n_bins_ = FrictionMap::MAX_BINS;
 

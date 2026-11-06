@@ -120,8 +120,26 @@ Dyn_Response_Packet DynamixelController::read_response(bool* valid,
     return result;
 }
 
+// Diagnostic event line: "GEV,<esp_ms>,<event>,<a>,<b>,<c>" (see link_stats()).
+static void gev(const char* event, float a = 0.0f, float b = 0.0f, float c = 0.0f)
+{
+    Serial.printf("GEV,%lu,%s,%.2f,%.2f,%.2f\n", millis(), event, a, b, c);
+}
+
+GripperLinkStats DynamixelController::link_stats() const
+{
+    GripperLinkStats s = _ls;
+    s.bad_replies = _bad_replies;
+    s.sent0 = _sent0;
+    s.sent1 = _sent1;
+    s.outstanding = _req_outstanding;
+    return s;
+}
+
 void DynamixelController::reject_and_relax(const char* why, bool have_pose, float p0, float p1)
 {
+    _ls.relaxes++;
+    gev("RELAX", p0, p1, have_pose ? 1.0f : 0.0f);
     // Relax first, then explain. STOP is fire-and-forget so a dead link
     // can't stall the caller.
     stop(nullptr);
@@ -191,12 +209,15 @@ void DynamixelController::poll_feedback()
 
         // Any well-framed reply means the Mega is free again, and every reply
         // type carries freshly read positions.
+        _ls.replies++;
         if (_req_outstanding) {
             _fb_latency_ms = millis() - _req_ms;
             _req_outstanding = false;
         }
-        if (r.response != DYN_ACK && r.response != DYN_PONG)
+        if (r.response != DYN_ACK && r.response != DYN_PONG) {
             _bad_replies++;
+            gev("BAD_REPLY", (float)r.response);
+        }
         float p0, p1;
         memcpy(&p0, &r.left_motor_position,  sizeof(float));
         memcpy(&p1, &r.right_motor_position, sizeof(float));
@@ -287,7 +308,9 @@ bool DynamixelController::pose_guard(bool* engaged)
         // since read_position drops glitch samples; an out-of-range reading
         // is re-read once before refusing.
         float p0 = 0.0f, p1 = 0.0f;
+        const unsigned long t_engage = millis();
         if (!(read_position(&p0, &p1, 200) || read_position(&p0, &p1, 200))) {
+            gev("ENGAGE_FAIL", (float)(millis() - t_engage));
             reject_and_relax("could not read servo positions", false, 0.0f, 0.0f);
             return false;
         }
@@ -305,6 +328,8 @@ bool DynamixelController::pose_guard(bool* engaged)
         _last_pose_check_ms = millis();
         seed_shaper(p0, p1);
         *engaged = true;
+        _ls.engages++;
+        gev("ENGAGE", p0, p1, (float)(millis() - t_engage));
         return true;
     }
 
@@ -316,6 +341,7 @@ bool DynamixelController::pose_guard(bool* engaged)
             return false;
     }
     if (millis() - _fb_ms > POSE_STALE_MS) {
+        gev("STALE", (float)(millis() - _fb_ms), (float)_fb_latency_ms);
         reject_and_relax("lost servo position feedback (no reply for 500 ms)", false, 0.0f, 0.0f);
         return false;
     }
@@ -383,6 +409,8 @@ void DynamixelController::move_servo_fast(float id0_deg, float id1_deg)
         reject_and_relax("commanded goal out of range", true, id0_deg, id1_deg);
         return;
     }
+    _ls.req0 = id0_deg;
+    _ls.req1 = id1_deg;
     bool engaged;
     if (!pose_guard(&engaged)) return;
     _last_blocked = false;
@@ -392,16 +420,20 @@ void DynamixelController::move_servo_fast(float id0_deg, float id1_deg)
     if (!engaged) {
         // Don't talk over the Mega while it answers a feedback request.
         if (_req_outstanding) {
-            if (now - _req_ms < POSE_REQ_TIMEOUT_MS) return;
+            if (now - _req_ms < POSE_REQ_TIMEOUT_MS) { _ls.held_off++; return; }
             _req_outstanding = false;                     // reply lost
+            _ls.lost++;
+            gev("REQ_LOST", (float)(now - _req_ms));
         }
         if (now - _last_move_tx_ms < MOVE_MIN_INTERVAL_MS) return;
     }
     bool want_fb = !engaged && (now - _last_pose_check_ms) >= POSE_CHECK_MS;
     bool changed = !(fabsf(id0_deg - _sent0) < MOVE_DEADBAND_DEG) ||
                    !(fabsf(id1_deg - _sent1) < MOVE_DEADBAND_DEG);   // NaN -> changed
-    if (!engaged && !want_fb && !changed)
+    if (!engaged && !want_fb && !changed) {
+        _ls.deadband_skips++;
         return;                                           // nothing new to say
+    }
 
     uint32_t left_bits, right_bits, zero = 0;
     memcpy(&left_bits,  &id0_deg, sizeof(left_bits));
@@ -417,7 +449,9 @@ void DynamixelController::move_servo_fast(float id0_deg, float id1_deg)
     _last_tx_ms = _last_move_tx_ms = now;
     _sent0 = id0_deg; _sent1 = id1_deg;
     _torque_maybe_off = false;
+    _ls.moves_sent++;
     if (want_fb) {
+        _ls.requests_sent++;
         _req_outstanding = true;
         _req_ms = now;
         _last_pose_check_ms = now;

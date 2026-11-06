@@ -121,6 +121,37 @@ static void print_slip_line()
     Serial.printf("SLIP,%.3f,%.3f,%d\n", st.result.avgL, st.result.avgR, st.slip_since_last ? 1 : 0);
 }
 
+static void pulse_slip_vibration(HapticMotorController* motor,
+                                bool trigger_engaged,
+                                bool slip_event,
+                                unsigned long now_ms,
+                                unsigned long& slip_vib_deadline_ms,
+                                bool& slip_vib_active)
+{
+    constexpr int   SLIP_VIB_HZ      = 60;
+    constexpr float SLIP_VIB_AMP     = 0.4f;
+    constexpr unsigned long SLIP_VIB_MS = 100;
+
+    if (!trigger_engaged) {
+        if (slip_vib_active) {
+            motor->vibrate(SLIP_VIB_HZ, 0.0f, nullptr);
+            slip_vib_active = false;
+        }
+        return;
+    }
+
+    if (slip_event) {
+        slip_vib_deadline_ms = now_ms + SLIP_VIB_MS;
+        slip_vib_active = true;
+        motor->vibrate(SLIP_VIB_HZ, SLIP_VIB_AMP, nullptr);
+    }
+
+    if (slip_vib_active && now_ms >= slip_vib_deadline_ms) {
+        motor->vibrate(SLIP_VIB_HZ, 0.0f, nullptr);
+        slip_vib_active = false;
+    }
+}
+
 // Tactile -> haptic force (tmt mode). Each finger's three tared channels are
 // summed (clamped to 0..TAC_SUM_MAX) and the larger side, s, sets the
 // constant force c (same units and sign convention as the CLI 'c' command)
@@ -237,6 +268,8 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     const unsigned long soft_start_ms = millis();
     float last_pos = NAN, trig_vel = 0.0f;          // trig_vel > 0 = toward release
     unsigned long last_pos_us = 0;
+    unsigned long slip_vib_deadline_ms = 0;
+    bool slip_vib_active = false;
 
     const unsigned long LOOP_PERIOD_US  = 5000;                       // 200 Hz target
     const unsigned long PRINT_PERIOD_US = tactile_force ? 10000 : 50000; // TMT 100 Hz, TM 20 Hz
@@ -261,6 +294,8 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             Serial.println("[TMT] friction floor OFF: no friction map - run 'fid' once (hands off the trigger).");
         Serial.println("TMT commands: tare, v <hz> <amp>, slip_thr <v>, slip_gate <v>, slip?, e to exit.");
         Serial.println("TMT,pos,t,id0,id1,sumL,sumR,c,T1,T2,T3,T4,T5,T6,stm_cmd,iq");   // column header
+        Serial.println("GRP,esp_ms,req0,req1,sent0,sent1,fb0,fb1,fb_age_ms,pending,fb_latency_ms,"
+                       "moves,requests,replies,lost,held_off,deadband_skips,bad_replies,engages,relaxes");
     }
     else
         Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
@@ -394,6 +429,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         // the vibration overlay and handles limit gating and ramp at 1 kHz.
         // Smooth start (tm and tmt): fade the force in when the mode begins.
         const float force_cmd = force * trigger_soft_start_gain(millis() - soft_start_ms);
+        const bool trigger_engaged = fabsf(force_cmd) > 0.05f;
 
         Response_Packet resp;
         unsigned long haptic_t0 = micros();
@@ -405,6 +441,13 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             Serial.printf("[TM] no ACK from haptic motor switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
             delay(200);
             continue;
+        }
+
+        if (tactile_force) {
+            SlipStatus slip_st;
+            slip_take(&slip_st);
+            pulse_slip_vibration(motor, trigger_engaged, slip_st.slip_since_last,
+                                 millis(), slip_vib_deadline_ms, slip_vib_active);
         }
 
         float pos_deg;
@@ -445,6 +488,22 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                           tac[0], tac[1], tac[2], tac[3], tac[4], tac[5],
                           -stm_cmd, -iq);
             print_slip_line();
+            if (gripper) {
+                // Gripper link diagnostics (see GripperLinkStats).
+                const GripperLinkStats ls = gripper->link_stats();
+                float fb0 = NAN, fb1 = NAN;
+                unsigned long fb_age = 0;
+                const bool have_fb = gripper->latest_feedback(&fb0, &fb1, &fb_age);
+                Serial.printf("GRP,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%ld,%d,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                              millis(), ls.req0, ls.req1, ls.sent0, ls.sent1, fb0, fb1,
+                              have_fb ? (long)fb_age : -1L, ls.outstanding ? 1 : 0,
+                              gripper->feedback_latency_ms(),
+                              (unsigned long)ls.moves_sent, (unsigned long)ls.requests_sent,
+                              (unsigned long)ls.replies, (unsigned long)ls.lost,
+                              (unsigned long)ls.held_off, (unsigned long)ls.deadband_skips,
+                              (unsigned long)ls.bad_replies, (unsigned long)ls.engages,
+                              (unsigned long)ls.relaxes);
+            }
         }
         else
             Serial.printf("[TM] pos=%+.2f t=%.2f ID0=%.1f ID1=%.1f switch40=%s switch41=%s led42=%s\n",

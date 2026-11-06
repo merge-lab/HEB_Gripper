@@ -31,7 +31,7 @@
 //   ID 0: closed 436 deg (= 76.07), open 341 deg (= -19)
 //   ID 1: closed 91.67,             open 184.92
 // Chosen (2026-11-02), kept well inside the mechanical stops:
-//   ID 0: closed 60  -> open 1        ID 1: closed 120 -> open 179
+//   ID 0: closed 70  -> open 1        ID 1: closed 110 -> open 179
 // The physical closed pose (ID 0 ~76, ID 1 ~92) is OUTSIDE these ranges on
 // purpose, so a gripper resting fully closed must be opened by hand into
 // range before the servos will engage.
@@ -40,9 +40,9 @@
 // or either servo's present position is outside its range (+/- the pose
 // tolerance), the move is rejected and both servos are relaxed (torque off).
 // No clamping: out-of-range input is treated as an error, not corrected.
-const float DXL_ID0_CLOSED_DEG = 60.0f;     // physical right finger
+const float DXL_ID0_CLOSED_DEG = 70.0f;     // physical right finger
 const float DXL_ID0_OPEN_DEG   = 1.0f;
-const float DXL_ID1_CLOSED_DEG = 120.0f;    // physical left finger
+const float DXL_ID1_CLOSED_DEG = 110.0f;    // physical left finger
 const float DXL_ID1_OPEN_DEG   = 179.0f;
 // Slack on the *present position* check only (not on commands), so normal
 // settling/overshoot near an end (e.g. 0.8 deg for a 1 deg goal) is accepted.
@@ -55,6 +55,23 @@ const float DXL_POSE_TOL_DEG   = 3.0f;
 // relax, after a heartbeat lapse), so the gripper never jumps to a stale goal.
 const float GRIPPER_MAX_DEG_PER_S  = 300.0f;    // ~servo top speed
 const float GRIPPER_MAX_DEG_PER_S2 = 6000.0f;   // ramp up/down
+
+// Gripper link counters and state, for diagnostics (see GRP lines in tmt).
+struct GripperLinkStats
+{
+    uint32_t moves_sent     = 0;   // streamed move packets written
+    uint32_t requests_sent  = 0;   // ... of which asked for feedback (MOVE_SERVO_LOG)
+    uint32_t replies        = 0;   // well-framed replies received asynchronously
+    uint32_t lost           = 0;   // feedback requests with no reply in time
+    uint32_t held_off       = 0;   // moves not sent: waiting for a pending reply
+    uint32_t deadband_skips = 0;   // moves not sent: goal unchanged
+    uint32_t bad_replies    = 0;   // replies with MALFORMED / FAILURE / unknown code
+    uint32_t engages        = 0;   // torque (re)engagements
+    uint32_t relaxes        = 0;   // guard rejections (servos relaxed)
+    float    req0 = NAN, req1 = NAN;     // last requested goal (before shaping)
+    float    sent0 = NAN, sent1 = NAN;   // last goal actually sent
+    bool     outstanding    = false;     // a feedback reply is pending
+};
 
 // SAFETY: every servo motion must go through move_servo(), move_servo_fast()
 // or move_servo_log(). Those are the only places that enforce the range rule
@@ -130,6 +147,9 @@ public:
     // unknown code) since boot. A rising count means the link is overloaded.
     unsigned long bad_reply_count() const { return _bad_replies; }
 
+    // Counters and state for diagnostics.
+    GripperLinkStats link_stats() const;
+
     // Most recent valid position feedback (from any reply) and its age.
     // Returns false if none has been received yet.
     bool latest_feedback(float* id0_deg, float* id1_deg, unsigned long* age_ms) const;
@@ -189,6 +209,7 @@ private:
     unsigned long _fb_ms           = 0;
     unsigned long _fb_latency_ms   = 0;
     unsigned long _bad_replies     = 0;
+    GripperLinkStats _ls;          // diagnostics counters
     int           _bad_pose_streak = 0;
 
     // ---- Goal shaper ----------------------------------------------------------

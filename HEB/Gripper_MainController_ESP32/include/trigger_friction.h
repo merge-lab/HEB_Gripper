@@ -23,13 +23,14 @@
 //      of level_mult x breakaway, `cycles` times each. Higher force = higher
 //      speed. The force is cut at the far point so friction stops the
 //      trigger before the mechanical stop.
-//   3. Per 1-deg bin and direction, fit  force = f0 + b * speed  over all
-//      samples (b pooled over bins). f0 is the friction (plus any
-//      position-dependent pull) to overcome at that position.
+//   3. For each direction and fine-grained position bin, fit the measured
+//      force as force = f0(pos) + b(pos) * speed. The result is a position x
+//      velocity friction map: friction offset and viscous slope vary as the
+//      trigger moves through its travel.
 
 struct FrictionMap
 {
-    static constexpr int   MAX_BINS  = 64;
+    static constexpr int   MAX_BINS  = 128;
     // Known upper bound of this trigger's friction (c units): the force floor
     // is never set above it, whatever the measurement says.
     static constexpr float FLOOR_MAX = 0.3f;
@@ -68,14 +69,14 @@ public:
 
 struct FrictionIdConfig
 {
-    float end_margin    = 3.0f;   // keep sweeps this far from each end (deg)
-    float u_max         = 0.9f;   // never command more than this
-    float breakaway_max = 0.45f;  // friction is <= FLOOR_MAX; no motion by here = blocked
-    float ramp_rate     = 0.5f;   // c per second, breakaway search
-    float v_break       = 5.0f;   // deg/s that counts as "moving"
-    float level_mult[3] = { 1.2f, 1.5f, 2.0f };
-    int   cycles        = 2;      // back-and-forth sweeps per level
-    float pass_timeout  = 10.0f;  // s, per sweep
+    float end_margin    = 2.0f;   // keep sweeps this far from each end (deg)
+    float u_max         = 0.75f;  // never command more than this
+    float breakaway_max = 0.35f;  // friction is <= FLOOR_MAX; no motion by here = blocked
+    float ramp_rate     = 0.25f;  // c per second, breakaway search
+    float v_break       = 2.0f;   // deg/s that counts as "moving"
+    float level_mult[3] = { 1.0f, 1.2f, 1.5f };
+    int   cycles        = 3;      // back-and-forth sweeps per level
+    float pass_timeout  = 15.0f;  // s, per sweep
 };
 
 // Runs the identification between the closed end (close_pos) and the release
