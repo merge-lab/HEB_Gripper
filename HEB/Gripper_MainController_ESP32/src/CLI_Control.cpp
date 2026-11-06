@@ -147,21 +147,27 @@ static void pulse_slip_vibration(HapticMotorController* motor,
 
     if (!trigger_engaged) {
         if (slip_vib_active) {
-            motor->vibrate(SLIP_VIB_HZ, 0.0f, nullptr);
-            slip_vib_active = false;
+            Response_Packet reply;
+            if (motor->vibrate(SLIP_VIB_HZ, 0.0f, &reply, 20))
+                slip_vib_active = false;
         }
         return;
     }
 
     if (slip_event) {
         slip_vib_deadline_ms = now_ms + SLIP_VIB_MS;
-        slip_vib_active = true;
-        motor->vibrate(SLIP_VIB_HZ, SLIP_VIB_AMP, nullptr);
+        // The overlay persists on the STM32. Only send the transition, and
+        // consume its ACK so it cannot become the next encoder sample.
+        if (!slip_vib_active) {
+            Response_Packet reply;
+            slip_vib_active = motor->vibrate(SLIP_VIB_HZ, SLIP_VIB_AMP, &reply, 20);
+        }
     }
 
-    if (slip_vib_active && now_ms >= slip_vib_deadline_ms) {
-        motor->vibrate(SLIP_VIB_HZ, 0.0f, nullptr);
-        slip_vib_active = false;
+    if (slip_vib_active && (long)(now_ms - slip_vib_deadline_ms) >= 0) {
+        Response_Packet reply;
+        if (motor->vibrate(SLIP_VIB_HZ, 0.0f, &reply, 20))
+            slip_vib_active = false;
     }
 }
 
@@ -277,22 +283,26 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     // The force is decided before each exchange, so they use the previous
     // reply's position and speed (one loop, ~5 ms, old).
     const FrictionMap& fmap = trigger_friction_map();
-    const bool use_floor = tactile_force && fmap.valid;
     if (tactile_force && !fmap.valid) {
         Serial.println("[TMT] no friction map loaded; running short friction ID before live compensation.");
         trigger_friction_id(motor, gripper);
     }
+    const bool use_floor = tactile_force && fmap.valid;
     const unsigned long soft_start_ms = millis();
     float last_pos = NAN, trig_vel = 0.0f;          // trig_vel > 0 = toward release
     unsigned long last_pos_us = 0;
     unsigned long slip_vib_deadline_ms = 0;
     bool slip_vib_active = false;
     float slip_hold_id0 = NAN, slip_hold_id1 = NAN;
+    unsigned long slip_hold_until_ms = 0;
+    bool slip_telemetry_latch = false;
+    SlipStatus slip_report;
 
     const unsigned long LOOP_PERIOD_US  = 5000;                       // 200 Hz target
     const unsigned long PRINT_PERIOD_US = tactile_force ? 10000 : 50000; // TMT 100 Hz, TM 20 Hz
     unsigned long next_loop_us  = micros();
     unsigned long last_print_us = 0;
+    unsigned long last_no_ack_ms = millis() - 1000;
     unsigned long stats_start_ms = millis();
     unsigned long stats_loops = 0, stats_haptic_us = 0, stats_haptic_max_us = 0;
     unsigned long stats_bad0 = gripper ? gripper->bad_reply_count() : 0;
@@ -457,21 +467,27 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
 
         Response_Packet resp;
         unsigned long haptic_t0 = micros();
-        bool ok = motor->set_constant_force(force_cmd, &resp);
+        bool ok = motor->set_constant_force(force_cmd, &resp, 20);
         unsigned long haptic_us = micros() - haptic_t0;
 
         if (!ok)
         {
-            Serial.printf("[TM] no ACK from haptic motor switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
-            delay(200);
+            if (millis() - last_no_ack_ms >= 1000) {
+                last_no_ack_ms = millis();
+                Serial.printf("[TM] no ACK from haptic motor switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+            }
+            delay(1);
             continue;
         }
 
         if (tactile_force) {
-            SlipStatus slip_st;
-            slip_take(&slip_st);
-            pulse_slip_vibration(motor, trigger_engaged, slip_st.slip_since_last,
+            slip_take(&slip_report);
+            slip_telemetry_latch |= slip_report.slip_since_last;
+            const bool was_active = slip_vib_active;
+            pulse_slip_vibration(motor, trigger_engaged, slip_report.slip_since_last,
                                  millis(), slip_vib_deadline_ms, slip_vib_active);
+            if (!was_active && slip_vib_active)
+                slip_hold_until_ms = millis() + 100;
         }
 
         float pos_deg;
@@ -491,10 +507,10 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
 
         // The slip vibration briefly shakes the encoder but should not make the
-        // closed-loop servo target chase that noise. Hold the last stable target
-        // for the 100 ms pulse window; at ~200 Hz servo update rate, that's ~20
-        // commands of the same target rather than a noisy chase.
-        if (slip_vib_active) {
+        // closed-loop servo target chase that noise. Hold for at most 100 ms
+        // from the onset, even if continued slip extends the vibration. Holding
+        // for the entire extended pulse could freeze mapping indefinitely.
+        if (slip_vib_active && (long)(slip_hold_until_ms - millis()) > 0) {
             if (!isfinite(slip_hold_id0) || !isfinite(slip_hold_id1)) {
                 slip_hold_id0 = id0_deg;
                 slip_hold_id1 = id1_deg;
@@ -510,7 +526,10 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             gripper->move_servo_fast(id0_deg, id1_deg);
 
         unsigned long now_us = micros();
-        bool print_now = (now_us - last_print_us) >= PRINT_PERIOD_US;
+        // USB telemetry must never wait for the host to drain its TX buffer.
+        // Reserve enough space for this entire group of lines before printing.
+        bool print_now = (now_us - last_print_us) >= PRINT_PERIOD_US &&
+                         Serial.availableForWrite() >= 768;
         if (print_now) last_print_us = now_us;
 
         if (!print_now)
@@ -528,7 +547,11 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                           pos_deg, t, id0_deg, id1_deg, sumL, sumR, -force_cmd,
                           tac[0], tac[1], tac[2], tac[3], tac[4], tac[5],
                           -stm_cmd, -iq);
-            print_slip_line();
+            // The control path already consumed the detector latch. Carry it
+            // forward to telemetry instead of taking (and clearing) it twice.
+            Serial.printf("SLIP,%.3f,%.3f,%d\n", slip_report.result.avgL, slip_report.result.avgR,
+                          slip_telemetry_latch ? 1 : 0);
+            slip_telemetry_latch = false;
             if (gripper) {
                 // Gripper link diagnostics (see GripperLinkStats).
                 const GripperLinkStats ls = gripper->link_stats();
@@ -555,7 +578,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         stats_haptic_us += haptic_us;
         if (haptic_us > stats_haptic_max_us) stats_haptic_max_us = haptic_us;
         unsigned long stats_ms = millis() - stats_start_ms;
-        if (stats_ms >= 1000)
+        if (stats_ms >= 1000 && Serial.availableForWrite() >= 384)
         {
             unsigned long fb_age = 0;
             bool have_fb = gripper && gripper->latest_feedback(nullptr, nullptr, &fb_age);

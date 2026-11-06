@@ -5,9 +5,21 @@ void HapticMotorController::send_packet(Command_Packet packet)
     SerialConnection->write((uint8_t*)&packet, sizeof(packet));
 }
 
-bool HapticMotorController::send_command(const Command_Packet& packet, Response_Packet* recieved)
+bool HapticMotorController::send_command(const Command_Packet& packet, Response_Packet* recieved,
+                                        unsigned long timeout_ms)
 {
     Command_Packet to_send = packet;
+
+    // Every STM32 command generates a reply, including calls with no output
+    // pointer. Finish that transaction before sending another command; otherwise
+    // its ACK is mistaken for the next force command's encoder sample and an
+    // ever-growing RX backlog makes trigger mapping lag behind real motion.
+    if (response_pending) {
+        bool valid = false;
+        read_response(&valid, 20);
+        response_pending = false;
+    }
+    while (SerialConnection->available()) SerialConnection->read();
 
     if (temp_sensor != nullptr)
     {
@@ -30,17 +42,19 @@ bool HapticMotorController::send_command(const Command_Packet& packet, Response_
     send_packet(to_send);
 
     // Fire-and-forget: caller didn't ask for a response.
-    if (recieved == NULL)
+    if (recieved == NULL) {
+        response_pending = true;
         return true;
+    }
 
     bool valid_check = false;
-    *recieved = read_response(&valid_check, 500);
+    *recieved = read_response(&valid_check, timeout_ms);
     return valid_check;
 }
 
 Response_Packet HapticMotorController::read_response(bool* valid, unsigned long timeout)
 {
-    Response_Packet result;
+    Response_Packet result = {};
     if (valid != nullptr) *valid = false;
 
     unsigned long start_time = millis();
@@ -114,12 +128,8 @@ bool HapticMotorController::ping_controller(unsigned long wait_time)
         END_BYTE
     };
 
-    // 2. Send it
-    send_packet(packet);
-
-    // 3. Read response
-    bool valid = false;
-    Response_Packet resp = read_response(&valid, wait_time);
+    Response_Packet resp;
+    bool valid = send_command(packet, &resp, wait_time);
 
     // 4. Validate response
     if (!valid)
@@ -128,7 +138,8 @@ bool HapticMotorController::ping_controller(unsigned long wait_time)
     return resp.response == PONG;
 }
 
-bool HapticMotorController::set_constant_force(float force, Response_Packet* recieved)
+bool HapticMotorController::set_constant_force(float force, Response_Packet* recieved,
+                                              unsigned long timeout_ms)
 {
     // Torque is a float, but params travel as uint32_t. Bit-cast (not numeric
     // convert) so the fractional part survives the wire.
@@ -144,7 +155,7 @@ bool HapticMotorController::set_constant_force(float force, Response_Packet* rec
         END_BYTE
     };
 
-    return send_command(packet, recieved);
+    return send_command(packet, recieved, timeout_ms);
 }
 
 bool HapticMotorController::set_constant_newton_force(float force, Response_Packet* recieved)
@@ -168,7 +179,8 @@ bool HapticMotorController::relax(Response_Packet* recieved)
     return send_command(packet, recieved);
 }
 
-bool HapticMotorController::vibrate(int frequency, float amplitude, Response_Packet* recieved)
+bool HapticMotorController::vibrate(int frequency, float amplitude, Response_Packet* recieved,
+                                    unsigned long timeout_ms)
 {
     // Vibrate on top of the current base mode.
     // param_1 = frequency (integer Hz); param_2 = amplitude (bit-cast float).
@@ -185,7 +197,7 @@ bool HapticMotorController::vibrate(int frequency, float amplitude, Response_Pac
         END_BYTE
     };
 
-    return send_command(packet, recieved);
+    return send_command(packet, recieved, timeout_ms);
 }
 
 bool HapticMotorController::set_spring_force(float spring_constant, Response_Packet* recieved)

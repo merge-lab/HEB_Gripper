@@ -36,7 +36,7 @@ public:
     Returns: true if a valid response was received (or NULL was passed,
              meaning we did not wait); false if the response was invalid/timed out
     */
-    bool set_constant_force(float force, Response_Packet* recieved);
+    bool set_constant_force(float force, Response_Packet* recieved, unsigned long timeout_ms = 500);
 
     /*
     Tell device to use constant force at given newtons.
@@ -87,7 +87,7 @@ public:
     Returns: true if a valid response was received (or NULL was passed,
             meaning we did not wait); false if the response was invalid/timed out
     */
-    bool vibrate(int frequency, float amplitude, Response_Packet* recieved);
+    bool vibrate(int frequency, float amplitude, Response_Packet* recieved, unsigned long timeout_ms = 500);
 
     /*
     Updates haptic behavior based on normalized finger readings [0,1].
@@ -147,6 +147,7 @@ public:
 
 private:
     HardwareSerial* SerialConnection;         // pointer to serial connection to STM board
+    bool response_pending = false;            // STM32 replies even to fire-and-forget commands
 
     // Thermal protection (see send_command()).
     CJMCU9908_Temp_Sensor* temp_sensor = nullptr;
@@ -201,7 +202,7 @@ private:
     Returns: true if a valid response was received (or NULL was passed,
              meaning we did not wait); false if the response was invalid/timed out
     */
-    bool send_command(const Command_Packet& packet, Response_Packet* recieved);
+    bool send_command(const Command_Packet& packet, Response_Packet* recieved, unsigned long timeout_ms = 500);
 
     /*
     Recieves a response packet and casts / returns it to the user
