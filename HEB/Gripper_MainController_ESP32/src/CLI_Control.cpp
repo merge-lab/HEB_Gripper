@@ -121,6 +121,19 @@ static void print_slip_line()
     Serial.printf("SLIP,%.3f,%.3f,%d\n", st.result.avgL, st.result.avgR, st.slip_since_last ? 1 : 0);
 }
 
+static float trigger_friction_compensation(float pos_deg, float trig_vel, const FrictionMap& fmap, float trigger_top)
+{
+    if (!fmap.valid)
+        return 0.0f;
+
+    const float d = trigger_top - pos_deg;
+    const float v = fabsf(trig_vel);
+    const float comp = (trig_vel >= 0.0f)
+        ? (fmap.open_at(d) + fmap.b_open * v + TRIGGER_FLOOR_MARGIN)
+        : (fmap.close_at(d) + fmap.b_close * v + TRIGGER_FLOOR_MARGIN);
+    return comp > 0.0f ? comp : 0.0f;
+}
+
 static void pulse_slip_vibration(HapticMotorController* motor,
                                 bool trigger_engaged,
                                 bool slip_event,
@@ -265,11 +278,16 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     // reply's position and speed (one loop, ~5 ms, old).
     const FrictionMap& fmap = trigger_friction_map();
     const bool use_floor = tactile_force && fmap.valid;
+    if (tactile_force && !fmap.valid) {
+        Serial.println("[TMT] no friction map loaded; running short friction ID before live compensation.");
+        trigger_friction_id(motor, gripper);
+    }
     const unsigned long soft_start_ms = millis();
     float last_pos = NAN, trig_vel = 0.0f;          // trig_vel > 0 = toward release
     unsigned long last_pos_us = 0;
     unsigned long slip_vib_deadline_ms = 0;
     bool slip_vib_active = false;
+    float slip_hold_id0 = NAN, slip_hold_id1 = NAN;
 
     const unsigned long LOOP_PERIOD_US  = 5000;                       // 200 Hz target
     const unsigned long PRINT_PERIOD_US = tactile_force ? 10000 : 50000; // TMT 100 Hz, TM 20 Hz
@@ -421,6 +439,12 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                     c_mag -= 0.5f * fmap.b_open * (trig_vel - TRIGGER_MAX_RETURN_DEG_S);
                     if (c_mag < 0.0f) c_mag = 0.0f;
                 }
+
+                const float friction_comp = trigger_friction_compensation(last_pos, trig_vel, fmap, trig.top);
+                if (friction_comp > 0.0f) {
+                    c_mag += friction_comp;
+                    if (c_mag > TAC_FORCE_MAX) c_mag = TAC_FORCE_MAX;
+                }
             }
             force = -c_mag;   // same sign convention as 'c'
         }
@@ -465,6 +489,23 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
         DynamixelController::opening_to_goals(t, &id0_deg, &id1_deg);
+
+        // The slip vibration briefly shakes the encoder but should not make the
+        // closed-loop servo target chase that noise. Hold the last stable target
+        // for the 100 ms pulse window; at ~200 Hz servo update rate, that's ~20
+        // commands of the same target rather than a noisy chase.
+        if (slip_vib_active) {
+            if (!isfinite(slip_hold_id0) || !isfinite(slip_hold_id1)) {
+                slip_hold_id0 = id0_deg;
+                slip_hold_id1 = id1_deg;
+            }
+            id0_deg = slip_hold_id0;
+            id1_deg = slip_hold_id1;
+        } else {
+            slip_hold_id0 = id0_deg;
+            slip_hold_id1 = id1_deg;
+        }
+
         if (gripper)
             gripper->move_servo_fast(id0_deg, id1_deg);
 
