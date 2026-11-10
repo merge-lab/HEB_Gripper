@@ -39,13 +39,38 @@ public:
     }
     uint32_t now_us() override { return (uint32_t)(t_ * 1e6); }
     bool abort_requested() override { return false; }
-    void log(const char* msg) override { std::printf("  %s\n", msg); }
-    void sample(float, float, float) override { samples_++; }
+    void log(const char* msg) override
+    {
+        std::printf("  %s\n", msg);
+        int level;
+        float speed;
+        if (std::sscanf(msg, "[FID] level %d/3: target speed %f", &level, &speed) == 2)
+            level_ = level - 1;
+    }
+    void sample(float pos, float u, float) override
+    {
+        samples_++;
+        // Interior motion excludes startup, turnarounds and zero-force settling.
+        if (level_ >= 0 && have_sample_ && u != 0.0f &&
+            pos > CLOSE + 5.0f && pos < OPEN - 5.0f) {
+            distance_[level_] += std::fabs(pos - previous_pos_);
+            duration_[level_] += t_ - previous_time_;
+        }
+        previous_pos_ = pos;
+        previous_time_ = t_;
+        have_sample_ = true;
+    }
+
+    double distance_[3] = {}, duration_[3] = {};
 
     double t_ = 0;
     long samples_ = 0;
 
 private:
+    int level_ = -1;
+    bool have_sample_ = false;
+    float previous_pos_ = 0;
+    double previous_time_ = 0;
     float x_, v_ = 0, cmd_ = 0, filt_ = 0;
     double next_stm_ = 0;
     std::mt19937 rng_{1};
@@ -90,6 +115,13 @@ int main()
         FrictionMap m;
         const bool ok = run_friction_id(sim, CLOSE, OPEN, cfg, &m);
         if (!ok) { std::printf("  FAILED\n"); failures++; continue; }
+
+        for (int k = 0; k < 3; k++) {
+            const double speed = sim.duration_[k] > 0 ? sim.distance_[k] / sim.duration_[k] : 0;
+            std::printf("  level %d mean interior speed %.2f deg/s (target %.1f)\n",
+                        k + 1, speed, cfg.sweep_speed[k]);
+            if (std::fabs(speed - cfg.sweep_speed[k]) > 0.25f * cfg.sweep_speed[k]) failures++;
+        }
 
         if (g_sticky) {                 // show the map across the sticky spot
             std::printf("  x(deg)  true->rel  map->rel   true->cl  map->cl\n");

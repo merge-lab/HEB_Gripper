@@ -62,7 +62,7 @@ private:
 
     // Previous two samples, for the lag-free (centred-difference) speed used
     // in the fit. vel_ is low-pass filtered (lags ~15 ms) and only drives the
-    // stall / breakaway decisions.
+    // speed control and stall / breakaway decisions.
     struct Sample { float pos, force; uint32_t t; bool valid; };
     Sample s1_ = {0, 0, 0, false}, s2_ = {0, 0, 0, false};   // s1_ newest
 
@@ -130,15 +130,26 @@ private:
         return u;
     }
 
-    // Constant-force sweep in direction dir until pos passes target.
-    PassResult pass(int dir, float level, float target, int rec_dir)
+    // Slow speed-controlled sweep; measured force is still used in the fit.
+    PassResult pass(int dir, float level, float speed, float target, int rec_dir)
     {
         const float start = pos_;
         const uint32_t t0 = io_.now_us();
         uint32_t still_since = 0;
+        float integral = level;
+        const float timeout = fmaxf(cfg_.pass_timeout, 3.0f * fabsf(target - start) / speed + 2.0f);
         s1_.valid = s2_.valid = false;
         while (dir > 0 ? pos_ < target : pos_ > target) {
-            if (!step(dir * level)) return FAILED;
+            const float error = speed - dir * vel_;
+            const float raw = integral + cfg_.speed_kp * error;
+            const float command = fminf(cfg_.u_max, fmaxf(0.0f, raw));
+            const uint32_t previous = t_prev_;
+            if (!step(dir * command)) return FAILED;
+            const float dt = (uint32_t)(t_prev_ - previous) * 1e-6f;
+            // Anti-windup: only integrate toward the usable force range.
+            if ((raw >= 0.0f && raw <= cfg_.u_max) ||
+                (raw < 0.0f && error > 0.0f) || (raw > cfg_.u_max && error < 0.0f))
+                integral = fminf(cfg_.u_max, fmaxf(0.0f, integral + cfg_.speed_ki * error * dt));
             const float v = dir * vel_;                // filtered speed in the sweep direction
             // Record the PREVIOUS sample with its centred-difference speed
             // (from the samples either side of it).
@@ -161,7 +172,7 @@ private:
             } else {
                 still_since = 0;
             }
-            if (elapsed_s(t0) > cfg_.pass_timeout) {
+            if (elapsed_s(t0) > timeout) {
                 io_.log("[FID] sweep timed out.");
                 failed_ = true;
                 return FAILED;
@@ -172,10 +183,10 @@ private:
     }
 
     // Sweep to target, raising the force a little if it stalls (up to 3 times).
-    bool sweep(int dir, float* level, float target, int rec_dir)
+    bool sweep(int dir, float* level, float speed, float target, int rec_dir)
     {
         for (int tries = 0; tries < 4; tries++) {
-            const PassResult r = pass(dir, *level, target, rec_dir);
+            const PassResult r = pass(dir, *level, speed, target, rec_dir);
             if (r == REACHED) return true;
             if (r == FAILED) return false;
             *level += 0.05f;
@@ -192,6 +203,12 @@ private:
 
 bool Runner::run(FrictionMap* out)
 {
+    for (float speed : cfg_.sweep_speed) {
+        if (!isfinite(speed) || speed <= 0.5f) {
+            io_.log("[FID] sweep speeds must be finite and above 0.5 deg/s.");
+            return false;
+        }
+    }
     const float travel = open_ - close_;
     const float A = close_ + cfg_.end_margin;       // closed-side turnaround
     const float B = open_  - cfg_.end_margin;       // release-side turnaround
@@ -217,34 +234,34 @@ bool Runner::run(FrictionMap* out)
     if (pos_ > 0.5f * (A + B)) {
         io_.log("[FID] finding breakaway force toward closed...");
         if ((ub_close = breakaway(-1)) < 0) return false;
-        lv = ub_close * cfg_.level_mult[0];
-        if (pos_ > A && !sweep(-1, &lv, A, -1)) return false;
+        lv = ub_close;
+        if (pos_ > A && !sweep(-1, &lv, cfg_.sweep_speed[0], A, -1)) return false;
         io_.log("[FID] finding breakaway force toward release...");
         if ((ub_open = breakaway(+1)) < 0) return false;
-        lv = ub_open * cfg_.level_mult[0];
-        if (!sweep(+1, &lv, B, -1)) return false;
+        lv = ub_open;
+        if (!sweep(+1, &lv, cfg_.sweep_speed[0], B, -1)) return false;
     } else {
         io_.log("[FID] finding breakaway force toward release...");
         if ((ub_open = breakaway(+1)) < 0) return false;
-        lv = ub_open * cfg_.level_mult[0];
-        if (pos_ < B && !sweep(+1, &lv, B, -1)) return false;
+        lv = ub_open;
+        if (pos_ < B && !sweep(+1, &lv, cfg_.sweep_speed[0], B, -1)) return false;
         io_.log("[FID] finding breakaway force toward closed...");
         if ((ub_close = breakaway(-1)) < 0) return false;
     }
-    lv = ub_close * cfg_.level_mult[0];
-    if (!sweep(-1, &lv, A, -1)) return false;
+    lv = ub_close;
+    if (!sweep(-1, &lv, cfg_.sweep_speed[0], A, -1)) return false;
     say("[FID] breakaway: toward release %.3f, toward closed %.3f.", ub_open, ub_close);
 
-    // Measured sweeps: increasing force levels, back and forth.
+    // Measured sweeps: several low speeds to identify the viscous slope.
     for (int k = 0; k < 3; k++) {
-        float lo = ub_open  * cfg_.level_mult[k];
-        float lc = ub_close * cfg_.level_mult[k];
+        float lo = ub_open;
+        float lc = ub_close;
         if (lo > cfg_.u_max) lo = cfg_.u_max;
         if (lc > cfg_.u_max) lc = cfg_.u_max;
-        say("[FID] level %.0f/3: force %.2f toward release, %.2f toward closed.", k + 1, lo, lc);
+        say("[FID] level %.0f/3: target speed %.1f deg/s.", k + 1, cfg_.sweep_speed[k]);
         for (int c = 0; c < cfg_.cycles; c++) {
-            if (!sweep(+1, &lo, B, 0)) return false;
-            if (!sweep(-1, &lc, A, 1)) return false;
+            if (!sweep(+1, &lo, cfg_.sweep_speed[k], B, 0)) return false;
+            if (!sweep(-1, &lc, cfg_.sweep_speed[k], A, 1)) return false;
         }
     }
     if (!hold(0.0f, 0.2f)) return false;

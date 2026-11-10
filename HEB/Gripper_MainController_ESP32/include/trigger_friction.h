@@ -16,13 +16,13 @@
 // powers up, but the release end is found again every session, so a map in
 // d stays valid across restarts.
 //
-// Method (open loop, so nothing to tune and nothing to oscillate):
+// Method:
 //   1. In each direction, ramp the force slowly until the trigger starts to
 //      move: the breakaway force.
-//   2. Sweep end to end (end_margin from each stop) at constant force levels
-//      of level_mult x breakaway, `cycles` times each. Higher force = higher
-//      speed. The force is cut at the far point so friction stops the
-//      trigger before the mechanical stop.
+//   2. Sweep end to end (end_margin from each stop) at low target speeds,
+//      `cycles` times each. Adjust force from measured speed so low-friction
+//      regions do not cause fast sweeps. The force is cut at the far point
+//      so friction stops the trigger before the mechanical stop.
 //   3. For each direction and fine-grained position bin, fit the measured
 //      force as force = f0(pos) + b(pos) * speed. The result is a position x
 //      velocity friction map: friction offset and viscous slope vary as the
@@ -74,9 +74,11 @@ struct FrictionIdConfig
     float breakaway_max = 0.35f;  // friction is <= FLOOR_MAX; no motion by here = blocked
     float ramp_rate     = 0.25f;  // c per second, breakaway search
     float v_break       = 2.0f;   // deg/s that counts as "moving"
-    float level_mult[3] = { 1.0f, 1.2f, 1.5f };
+    float sweep_speed[3] = { 5.0f, 10.0f, 15.0f }; // deg/s, slow friction measurements
+    float speed_kp      = 0.004f; // c per deg/s, speed feedback
+    float speed_ki      = 0.04f;  // c per deg, integral speed feedback
     int   cycles        = 3;      // back-and-forth sweeps per level
-    float pass_timeout  = 15.0f;  // s, per sweep
+    float pass_timeout  = 30.0f;  // s minimum per sweep; extended for slow/long travel
 };
 
 // Runs the identification between the closed end (close_pos) and the release
