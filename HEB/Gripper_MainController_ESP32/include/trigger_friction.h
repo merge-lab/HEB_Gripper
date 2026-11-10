@@ -19,10 +19,10 @@
 // Method:
 //   1. In each direction, ramp the force slowly until the trigger starts to
 //      move: the breakaway force.
-//   2. Sweep end to end (end_margin from each stop) at low target speeds,
-//      `cycles` times each. Adjust force from measured speed so low-friction
-//      regions do not cause fast sweeps. The force is cut at the far point
-//      so friction stops the trigger before the mechanical stop.
+//   2. Sweep at successively lower constant forces, `cycles` times each.
+//      Launch with a breakaway ramp, then apply the test force unchanged.
+//      Stalls are expected near sliding friction; recover without recording
+//      and continue at the next lower level. Speed is only measured.
 //   3. For each direction and fine-grained position bin, fit the measured
 //      force as force = f0(pos) + b(pos) * speed. The result is a position x
 //      velocity friction map: friction offset and viscous slope vary as the
@@ -50,6 +50,9 @@ struct FrictionMap
     // Force needed to return the trigger at v_return deg/s, plus margin,
     // limited to 0 .. FLOOR_MAX.
     float floor_at(float d, float v_return, float margin) const;
+
+    // Signed assistance in the direction of motion, tapered to zero at rest.
+    float compensation_at(float d, float velocity) const;
 };
 
 // What the identification needs from the hardware.
@@ -74,11 +77,12 @@ struct FrictionIdConfig
     float breakaway_max = 0.35f;  // friction is <= FLOOR_MAX; no motion by here = blocked
     float ramp_rate     = 0.25f;  // c per second, breakaway search
     float v_break       = 2.0f;   // deg/s that counts as "moving"
-    float sweep_speed[3] = { 5.0f, 10.0f, 15.0f }; // deg/s, slow friction measurements
-    float speed_kp      = 0.004f; // c per deg/s, speed feedback
-    float speed_ki      = 0.04f;  // c per deg, integral speed feedback
+    float start_mult    = 1.25f;  // first force relative to successful warm-up
+    float force_decay   = 0.85f;  // each subsequent level is 15% lower
+    float force_min     = 0.02f;  // lowest test force (c units)
+    int   levels        = 12;     // descending force levels
     int   cycles        = 3;      // back-and-forth sweeps per level
-    float pass_timeout  = 30.0f;  // s minimum per sweep; extended for slow/long travel
+    float pass_timeout  = 30.0f;  // s per constant-force probe
 };
 
 // Runs the identification between the closed end (close_pos) and the release

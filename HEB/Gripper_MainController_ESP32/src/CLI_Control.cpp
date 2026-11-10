@@ -284,7 +284,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     // reply's position and speed (one loop, ~5 ms, old).
     const FrictionMap& fmap = trigger_friction_map();
     if (tactile_force && !fmap.valid) {
-        Serial.println("[TMT] no friction map loaded; running short friction ID before live compensation.");
+        Serial.println("[TMT] no friction map loaded; running friction ID (hands off, may take several minutes).");
         trigger_friction_id(motor, gripper);
     }
     const bool use_floor = tactile_force && fmap.valid;
@@ -325,8 +325,11 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         Serial.println("GRP,esp_ms,req0,req1,sent0,sent1,fb0,fb1,fb_age_ms,pending,fb_latency_ms,"
                        "moves,requests,replies,lost,held_off,deadband_skips,bad_replies,engages,relaxes");
     }
-    else
+    else {
         Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
+        Serial.println(fmap.valid ? "[TM] directional friction compensation ON; c 0 assists free motion."
+                                 : "[TM] no friction compensation; run 'fid' first.");
+    }
 
     while (true)
     {
@@ -462,7 +465,11 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         // Keep the selected base force and heartbeat active; the STM32 retains
         // the vibration overlay and handles limit gating and ramp at 1 kHz.
         // Smooth start (tm and tmt): fade the force in when the mode begins.
-        const float force_cmd = force * trigger_soft_start_gain(millis() - soft_start_ms);
+        // Manual c is the requested apparent force. Cancel measured friction
+        // in the direction of motion, including at c 0. STM32 force is -u.
+        const float manual_assist = !tactile_force && !isnan(last_pos)
+            ? fmap.compensation_at(trig.top - last_pos, trig_vel) : 0.0f;
+        const float force_cmd = (force - manual_assist) * trigger_soft_start_gain(millis() - soft_start_ms);
         const bool trigger_engaged = fabsf(force_cmd) > 0.05f;
 
         Response_Packet resp;

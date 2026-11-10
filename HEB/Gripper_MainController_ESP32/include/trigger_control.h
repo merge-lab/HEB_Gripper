@@ -37,7 +37,7 @@ void trigger_control_begin();
 const FrictionMap& trigger_friction_map();
 
 // 'fid': find the ends if needed, measure friction, store and print the map.
-// Blocking (~20-30 s). Hands off the trigger. 'e' + Enter aborts.
+// Blocking (several minutes). Hands off the trigger. 'e' + Enter aborts.
 bool trigger_friction_id(HapticMotorController* motor, DynamixelController* gripper);
 
 // 'fid?': print the stored map as FRICMAP / FRICBIN / FRICEND lines.

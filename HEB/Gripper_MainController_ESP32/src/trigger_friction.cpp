@@ -26,6 +26,19 @@ float FrictionMap::floor_at(float d, float v_return, float margin) const
     return f < 0.0f ? 0.0f : (f > FLOOR_MAX ? FLOOR_MAX : f);
 }
 
+float FrictionMap::compensation_at(float d, float velocity) const
+{
+    if (!valid || !isfinite(d) || !isfinite(velocity)) return 0.0f;
+    const float speed = fabsf(velocity);
+    // Encoder noise must not choose a direction at rest. Fade assistance in
+    // over 2 deg/s, with a small residual drag to avoid overcompensation.
+    const float gain = 0.95f * fminf(1.0f, fmaxf(0.0f, (speed - 0.3f) / 2.0f));
+    const float friction = velocity > 0.0f ? open_at(d) + b_open * speed
+                                           : close_at(d) + b_close * speed;
+    const float assist = gain * fminf(FLOOR_MAX, fmaxf(0.0f, friction));
+    return velocity > 0.0f ? assist : -assist;
+}
+
 // ---- Identification ---------------------------------------------------------
 
 namespace {
@@ -62,7 +75,7 @@ private:
 
     // Previous two samples, for the lag-free (centred-difference) speed used
     // in the fit. vel_ is low-pass filtered (lags ~15 ms) and only drives the
-    // speed control and stall / breakaway decisions.
+    // stall / breakaway decisions.
     struct Sample { float pos, force; uint32_t t; bool valid; };
     Sample s1_ = {0, 0, 0, false}, s2_ = {0, 0, 0, false};   // s1_ newest
 
@@ -108,8 +121,9 @@ private:
     }
 
     // Ramp the force in direction dir until the trigger moves; returns the
-    // breakaway force (> 0), or < 0 on failure. Leaves the trigger stopped.
-    float breakaway(int dir)
+    // breakaway force (> 0), or < 0 on failure. Optionally leave it moving
+    // so a lower sliding-force probe can follow without another start.
+    float breakaway(int dir, bool stop = true)
     {
         const uint32_t t0 = io_.now_us();
         int moving = 0;
@@ -126,30 +140,19 @@ private:
             moving = (dir * vel_ > cfg_.v_break) ? moving + 1 : 0;
             if (moving >= 3) break;
         }
-        if (!hold(0.0f, 0.2f)) return -1.0f;
+        if (stop && !hold(0.0f, 0.2f)) return -1.0f;
         return u;
     }
 
-    // Slow speed-controlled sweep; measured force is still used in the fit.
-    PassResult pass(int dir, float level, float speed, float target, int rec_dir)
+    // Constant force throughout the pass: speed is measured, never controlled.
+    PassResult pass(int dir, float level, float target, int rec_dir)
     {
         const float start = pos_;
         const uint32_t t0 = io_.now_us();
         uint32_t still_since = 0;
-        float integral = level;
-        const float timeout = fmaxf(cfg_.pass_timeout, 3.0f * fabsf(target - start) / speed + 2.0f);
         s1_.valid = s2_.valid = false;
         while (dir > 0 ? pos_ < target : pos_ > target) {
-            const float error = speed - dir * vel_;
-            const float raw = integral + cfg_.speed_kp * error;
-            const float command = fminf(cfg_.u_max, fmaxf(0.0f, raw));
-            const uint32_t previous = t_prev_;
-            if (!step(dir * command)) return FAILED;
-            const float dt = (uint32_t)(t_prev_ - previous) * 1e-6f;
-            // Anti-windup: only integrate toward the usable force range.
-            if ((raw >= 0.0f && raw <= cfg_.u_max) ||
-                (raw < 0.0f && error > 0.0f) || (raw > cfg_.u_max && error < 0.0f))
-                integral = fminf(cfg_.u_max, fmaxf(0.0f, integral + cfg_.speed_ki * error * dt));
+            if (!step(dir * level)) return FAILED;
             const float v = dir * vel_;                // filtered speed in the sweep direction
             // Record the PREVIOUS sample with its centred-difference speed
             // (from the samples either side of it).
@@ -172,7 +175,11 @@ private:
             } else {
                 still_since = 0;
             }
-            if (elapsed_s(t0) > timeout) {
+            if (elapsed_s(t0) > cfg_.pass_timeout) {
+                if (rec_dir >= 0) {
+                    if (!hold(0.0f, 0.15f)) return FAILED;
+                    return STALLED; // a very slow low-force probe is also a limit
+                }
                 io_.log("[FID] sweep timed out.");
                 failed_ = true;
                 return FAILED;
@@ -183,10 +190,10 @@ private:
     }
 
     // Sweep to target, raising the force a little if it stalls (up to 3 times).
-    bool sweep(int dir, float* level, float speed, float target, int rec_dir)
+    bool sweep(int dir, float* level, float target, int rec_dir)
     {
         for (int tries = 0; tries < 4; tries++) {
-            const PassResult r = pass(dir, *level, speed, target, rec_dir);
+            const PassResult r = pass(dir, *level, target, rec_dir);
             if (r == REACHED) return true;
             if (r == FAILED) return false;
             *level += 0.05f;
@@ -203,11 +210,11 @@ private:
 
 bool Runner::run(FrictionMap* out)
 {
-    for (float speed : cfg_.sweep_speed) {
-        if (!isfinite(speed) || speed <= 0.5f) {
-            io_.log("[FID] sweep speeds must be finite and above 0.5 deg/s.");
-            return false;
-        }
+    if (cfg_.levels < 2 || !(cfg_.force_decay > 0.0f && cfg_.force_decay < 1.0f) ||
+        !(cfg_.start_mult >= 1.0f) || !isfinite(cfg_.start_mult) ||
+        !(cfg_.force_min > 0.0f && cfg_.force_min <= cfg_.u_max)) {
+        io_.log("[FID] invalid descending-force configuration.");
+        return false;
     }
     const float travel = open_ - close_;
     const float A = close_ + cfg_.end_margin;       // closed-side turnaround
@@ -231,38 +238,58 @@ bool Runner::run(FrictionMap* out)
     // trigger may be resting against either stop), then warm-up sweeps, so
     // the measured sweeps start at A.
     float ub_open = -1.0f, ub_close = -1.0f, lv;
+    float warm_open = 0.0f, warm_close = 0.0f;
     if (pos_ > 0.5f * (A + B)) {
         io_.log("[FID] finding breakaway force toward closed...");
         if ((ub_close = breakaway(-1)) < 0) return false;
         lv = ub_close;
-        if (pos_ > A && !sweep(-1, &lv, cfg_.sweep_speed[0], A, -1)) return false;
+        if (pos_ > A && !sweep(-1, &lv, A, -1)) return false;
+        warm_close = lv;
         io_.log("[FID] finding breakaway force toward release...");
         if ((ub_open = breakaway(+1)) < 0) return false;
         lv = ub_open;
-        if (!sweep(+1, &lv, cfg_.sweep_speed[0], B, -1)) return false;
+        if (!sweep(+1, &lv, B, -1)) return false;
+        warm_open = lv;
     } else {
         io_.log("[FID] finding breakaway force toward release...");
         if ((ub_open = breakaway(+1)) < 0) return false;
         lv = ub_open;
-        if (pos_ < B && !sweep(+1, &lv, cfg_.sweep_speed[0], B, -1)) return false;
+        if (pos_ < B && !sweep(+1, &lv, B, -1)) return false;
+        warm_open = lv;
         io_.log("[FID] finding breakaway force toward closed...");
         if ((ub_close = breakaway(-1)) < 0) return false;
     }
     lv = ub_close;
-    if (!sweep(-1, &lv, cfg_.sweep_speed[0], A, -1)) return false;
+    if (!sweep(-1, &lv, A, -1)) return false;
+    warm_close = fmaxf(warm_close, lv);
     say("[FID] breakaway: toward release %.3f, toward closed %.3f.", ub_open, ub_close);
 
-    // Measured sweeps: several low speeds to identify the viscous slope.
-    for (int k = 0; k < 3; k++) {
-        float lo = ub_open;
-        float lc = ub_close;
-        if (lo > cfg_.u_max) lo = cfg_.u_max;
-        if (lc > cfg_.u_max) lc = cfg_.u_max;
-        say("[FID] level %.0f/3: target speed %.1f deg/s.", k + 1, cfg_.sweep_speed[k]);
+    // Descend independently in each direction. A stalled low-force probe is
+    // useful data, not a failed calibration. Reposition with a known working
+    // force (unrecorded), then try the next, lower measurement force.
+    float lo = fmaxf(cfg_.force_min, fminf(cfg_.u_max, warm_open * cfg_.start_mult));
+    float lc = fmaxf(cfg_.force_min, fminf(cfg_.u_max, warm_close * cfg_.start_mult));
+    for (int k = 0; k < cfg_.levels; k++) {
+        say("[FID] descending level %.0f: force %.3f toward release, %.3f toward closed.", k + 1, lo, lc);
         for (int c = 0; c < cfg_.cycles; c++) {
-            if (!sweep(+1, &lo, cfg_.sweep_speed[k], B, 0)) return false;
-            if (!sweep(-1, &lc, cfg_.sweep_speed[k], A, 1)) return false;
+            for (int dir = 1; dir >= -1; dir -= 2) {
+                const float target = dir > 0 ? B : A;
+                const float level = dir > 0 ? lo : lc;
+                // Below breakaway, start moving with an unrecorded force ramp,
+                // then immediately switch to the lower, constant test force.
+                if (breakaway(dir, false) < 0) return false;
+                say("[FID] probe force %.4f.", dir * level);
+                const PassResult result = pass(dir, level, target, dir > 0 ? 0 : 1);
+                if (result == FAILED) return false;
+                if (result == STALLED) {
+                    say("[FID] low-force probe stalled at %.1f deg (force %.3f).", pos_, level);
+                    float& recovery = dir > 0 ? warm_open : warm_close;
+                    if (!sweep(dir, &recovery, target, -1)) return false;
+                }
+            }
         }
+        lo = fmaxf(cfg_.force_min, lo * cfg_.force_decay);
+        lc = fmaxf(cfg_.force_min, lc * cfg_.force_decay);
     }
     if (!hold(0.0f, 0.2f)) return false;
     return analyse(out);

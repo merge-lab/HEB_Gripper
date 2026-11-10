@@ -43,34 +43,41 @@ public:
     {
         std::printf("  %s\n", msg);
         int level;
-        float speed;
-        if (std::sscanf(msg, "[FID] level %d/3: target speed %f", &level, &speed) == 2)
-            level_ = level - 1;
+        float opening, closing;
+        if (std::sscanf(msg, "[FID] descending level %d: force %f toward release, %f toward closed.",
+                        &level, &opening, &closing) == 3) {
+            if (level != levels_ + 1 || opening > previous_open_ || closing > previous_close_)
+                force_errors_++;
+            previous_open_ = opening;
+            previous_close_ = closing;
+            levels_++;
+        }
+        float commanded;
+        if (std::sscanf(msg, "[FID] probe force %f", &commanded) == 1) {
+            probe_ = true;
+            probe_force_ = commanded;
+        }
     }
-    void sample(float pos, float u, float) override
+    void sample(float, float u, float) override
     {
         samples_++;
-        // Interior motion excludes startup, turnarounds and zero-force settling.
-        if (level_ >= 0 && have_sample_ && u != 0.0f &&
-            pos > CLOSE + 5.0f && pos < OPEN - 5.0f) {
-            distance_[level_] += std::fabs(pos - previous_pos_);
-            duration_[level_] += t_ - previous_time_;
+        last_command_ = u;
+        if (probe_) {
+            if (u == 0.0f) probe_ = false;
+            else if (std::fabs(u - probe_force_) > 0.0006f) force_errors_++;
         }
-        previous_pos_ = pos;
-        previous_time_ = t_;
-        have_sample_ = true;
     }
 
-    double distance_[3] = {}, duration_[3] = {};
+    int levels_ = 0, force_errors_ = 0;
+    float last_command_ = 0;
 
     double t_ = 0;
     long samples_ = 0;
 
 private:
-    int level_ = -1;
-    bool have_sample_ = false;
-    float previous_pos_ = 0;
-    double previous_time_ = 0;
+    bool probe_ = false;
+    float probe_force_ = 0;
+    float previous_open_ = 1e6f, previous_close_ = 1e6f;
     float x_, v_ = 0, cmd_ = 0, filt_ = 0;
     double next_stm_ = 0;
     std::mt19937 rng_{1};
@@ -116,11 +123,20 @@ int main()
         const bool ok = run_friction_id(sim, CLOSE, OPEN, cfg, &m);
         if (!ok) { std::printf("  FAILED\n"); failures++; continue; }
 
-        for (int k = 0; k < 3; k++) {
-            const double speed = sim.duration_[k] > 0 ? sim.distance_[k] / sim.duration_[k] : 0;
-            std::printf("  level %d mean interior speed %.2f deg/s (target %.1f)\n",
-                        k + 1, speed, cfg.sweep_speed[k]);
-            if (std::fabs(speed - cfg.sweep_speed[k]) > 0.25f * cfg.sweep_speed[k]) failures++;
+        if (sim.levels_ != cfg.levels || sim.force_errors_ || sim.last_command_ != 0.0f) {
+            std::printf("  FAILED force sequence / constant probe / final zero check\n");
+            failures++;
+        }
+        // Assistance follows motion, remains bounded and does not creep at rest.
+        for (float d = 0; d <= m.travel; d += 0.5f) {
+            if (m.compensation_at(d, 0.0f) != 0.0f ||
+                m.compensation_at(d, 0.2f) != 0.0f || m.compensation_at(d, -0.2f) != 0.0f)
+                failures++;
+            for (float velocity : {-100.0f, -10.0f, 10.0f, 100.0f}) {
+                const float assist = m.compensation_at(d, velocity);
+                if (assist * velocity < 0 || std::fabs(assist) > FrictionMap::FLOOR_MAX)
+                    failures++;
+            }
         }
 
         if (g_sticky) {                 // show the map across the sticky spot
@@ -135,6 +151,17 @@ int main()
             if (g_sticky && x > 28.5f && x < 34.5f) continue;   // a 1-deg bin can't resolve a step
             worst_open  = std::fmax(worst_open,  std::fabs(m.open_at(d)  - (coulomb(x) - PULL)));
             worst_close = std::fmax(worst_close, std::fabs(m.close_at(d) - (coulomb(x) + PULL)));
+            // At a steady hand-driven speed, compensation should remove
+            // most of the drag in both directions, including the pull bias.
+            for (float velocity : {-10.0f, 10.0f}) {
+                const float drag = coulomb(x) + B_TRUE * std::fabs(velocity)
+                                   + (velocity > 0 ? -PULL : PULL);
+                const float remaining = drag - std::fabs(m.compensation_at(d, velocity));
+                if (std::fabs(remaining) > 0.35f * drag) {
+                    std::printf("  FAILED residual drag at %.1f deg, velocity %.1f\n", x, velocity);
+                    failures++;
+                }
+            }
         }
         float floor_max = 0;
         for (float d = 0; d <= m.travel; d += 0.5f) floor_max = std::fmax(floor_max, m.floor_at(d, 20, 0.03f));

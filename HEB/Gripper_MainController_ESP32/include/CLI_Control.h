@@ -90,8 +90,9 @@ Tactile / slip (FORTE detector runs on-board at 2 kHz, see slip_core.h):
   slip?              print SLIPCFG,<thr>,<gate> and detector load
 
 Trigger friction (trigger_control.h / trigger_friction.h):
-  fid                measure friction along the travel (hands off, ~20-30 s);
-                     saved to flash; tmt then keeps its force above it
+  fid                measure friction at descending constant forces (hands off,
+                     several minutes); saved to flash; tmt uses a return floor
+                     and tm compensates friction in either direction (try c 0)
   fid?               print the stored map (FRICMAP / FRICBIN / FRICEND)
   fid_clear          forget the stored map
 */
