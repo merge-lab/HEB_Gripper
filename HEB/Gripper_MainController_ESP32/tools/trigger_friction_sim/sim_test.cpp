@@ -13,7 +13,14 @@ constexpr float B_TRUE = 0.003f;                  // viscous, c per deg/s
 constexpr float PULL = 0.02f;                     // constant pull toward release (spring-like)
 constexpr float J = B_TRUE * 0.02f;               // inertia: 20 ms mechanical time constant
 
+bool g_linkage = false;
 bool g_sticky = false;                            // add a sticky spot at 30..33 deg
+
+float pull_at(float x)
+{
+    const float phase = 2.0f * float(M_PI) * (x - CLOSE) / (OPEN - CLOSE);
+    return PULL + (g_linkage ? 0.04f * std::sin(phase) : 0.0f);
+}
 
 float coulomb(float x)                            // sliding friction along the travel, <= 0.3
 {
@@ -92,7 +99,7 @@ private:
                 filt_ += 0.1f * (cmd_ - filt_);
                 next_stm_ += 0.001;
             }
-            const float drive = filt_ + PULL;
+            const float drive = filt_ + pull_at(x_);
             const float fc = coulomb(x_), fs = 1.2f * fc;     // static 20% above sliding
             if (std::fabs(v_) < 1e-3f && std::fabs(drive) <= fs) { v_ = 0; continue; }
             const float dir = std::fabs(v_) > 1e-3f ? (v_ > 0 ? 1.0f : -1.0f) : (drive > 0 ? 1.0f : -1.0f);
@@ -111,12 +118,32 @@ private:
 int main()
 {
     int failures = 0;
-    struct Case { float x0; bool sticky; };
+    // Independent synthetic maps: a signed linkage load may exceed sliding
+    // friction, so compensation must preserve its sign through reversal.
+    FrictionMap synthetic;
+    synthetic.valid = true;
+    synthetic.n = 4;
+    synthetic.bin_w = 1.0f;
+    synthetic.b_open = synthetic.b_close = 0.003f;
+    for (int i = 0; i < synthetic.n; i++) {
+        const float load = (i - 1.5f) * 0.1f;
+        synthetic.f_open[i] = 0.10f + load;
+        synthetic.f_close[i] = 0.10f - load;
+        for (float velocity : {-10.0f, -0.2f, 0.0f, 0.2f, 10.0f}) {
+            const float sliding = std::fabs(velocity) > 0.3f ? (velocity > 0 ? 0.13f : -0.13f) : 0.0f;
+            const float expected = 0.95f * (load + sliding);
+            if (std::fabs(synthetic.compensation_at(i + 0.5f, velocity) - expected) > 1e-6f)
+                failures++;
+        }
+    }
+    struct Case { float x0; bool sticky; bool linkage = false; };
     for (Case cs : { Case{OPEN, false}, Case{CLOSE, false}, Case{0.5f * (CLOSE + OPEN), false},
-                     Case{OPEN, true} }) {
+                     Case{OPEN, true}, Case{OPEN, false, true} }) {
         const float x0 = cs.x0;
         g_sticky = cs.sticky;
+        g_linkage = cs.linkage;
         std::printf("start at %.1f deg%s:\n", x0, g_sticky ? ", with a sticky spot at 30-33 deg" : "");
+        if (g_linkage) std::printf("  with position-dependent linkage preload\n");
         SimTrigger sim(x0);
         FrictionIdConfig cfg;
         FrictionMap m;
@@ -127,14 +154,16 @@ int main()
             std::printf("  FAILED force sequence / constant probe / final zero check\n");
             failures++;
         }
-        // Assistance follows motion, remains bounded and does not creep at rest.
+        // Preload remains at rest; moving assistance is bounded in both directions.
         for (float d = 0; d <= m.travel; d += 0.5f) {
-            if (m.compensation_at(d, 0.0f) != 0.0f ||
-                m.compensation_at(d, 0.2f) != 0.0f || m.compensation_at(d, -0.2f) != 0.0f)
+            const float rest = std::fmin(FrictionMap::FLOOR_MAX,
+                std::fmax(-FrictionMap::FLOOR_MAX, 0.95f * m.bias_at(d)));
+            if (std::fabs(m.compensation_at(d, 0.0f) - rest) > 1e-6f ||
+                m.compensation_at(d, 0.2f) != m.compensation_at(d, -0.2f))
                 failures++;
             for (float velocity : {-100.0f, -10.0f, 10.0f, 100.0f}) {
                 const float assist = m.compensation_at(d, velocity);
-                if (assist * velocity < 0 || std::fabs(assist) > FrictionMap::FLOOR_MAX)
+                if (std::fabs(assist) > FrictionMap::FLOOR_MAX)
                     failures++;
             }
         }
@@ -142,20 +171,24 @@ int main()
         if (g_sticky) {                 // show the map across the sticky spot
             std::printf("  x(deg)  true->rel  map->rel   true->cl  map->cl\n");
             for (float x = 27.5f; x <= 35.5f; x += 1.0f)
-                std::printf("  %5.1f   %.3f      %.3f      %.3f     %.3f\n", x, coulomb(x) - PULL,
-                            m.open_at(OPEN - x), coulomb(x) + PULL, m.close_at(OPEN - x));
+                std::printf("  %5.1f   %.3f      %.3f      %.3f     %.3f\n", x, coulomb(x) - pull_at(x),
+                            m.open_at(OPEN - x), coulomb(x) + pull_at(x), m.close_at(OPEN - x));
         }
         float worst_open = 0, worst_close = 0;
         for (float d = cfg.end_margin + 3.5f; d <= OPEN - CLOSE - cfg.end_margin - 3; d += 1.0f) {
             const float x = OPEN - d;
             if (g_sticky && x > 28.5f && x < 34.5f) continue;   // a 1-deg bin can't resolve a step
-            worst_open  = std::fmax(worst_open,  std::fabs(m.open_at(d)  - (coulomb(x) - PULL)));
-            worst_close = std::fmax(worst_close, std::fabs(m.close_at(d) - (coulomb(x) + PULL)));
+            worst_open  = std::fmax(worst_open,  std::fabs(m.open_at(d)  - (coulomb(x) - pull_at(x))));
+            worst_close = std::fmax(worst_close, std::fabs(m.close_at(d) - (coulomb(x) + pull_at(x))));
+            if (std::fabs(m.bias_at(d) + pull_at(x)) > 0.03f) {
+                std::printf("  FAILED linkage preload estimate at %.1f deg\n", x);
+                failures++;
+            }
             // At a steady hand-driven speed, compensation should remove
             // most of the drag in both directions, including the pull bias.
             for (float velocity : {-10.0f, 10.0f}) {
                 const float drag = coulomb(x) + B_TRUE * std::fabs(velocity)
-                                   + (velocity > 0 ? -PULL : PULL);
+                                   + (velocity > 0 ? -pull_at(x) : pull_at(x));
                 const float remaining = drag - std::fabs(m.compensation_at(d, velocity));
                 if (std::fabs(remaining) > 0.35f * drag) {
                     std::printf("  FAILED residual drag at %.1f deg, velocity %.1f\n", x, velocity);

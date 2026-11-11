@@ -26,17 +26,27 @@ float FrictionMap::floor_at(float d, float v_return, float margin) const
     return f < 0.0f ? 0.0f : (f > FLOOR_MAX ? FLOOR_MAX : f);
 }
 
+float FrictionMap::bias_at(float d) const
+{
+    if (!valid || !isfinite(d)) return 0.0f;
+    // Opening needs friction + load; closing needs friction - load.
+    // Assumes approximately symmetric sliding friction at each position.
+    return 0.5f * (open_at(d) - close_at(d));
+}
+
 float FrictionMap::compensation_at(float d, float velocity) const
 {
     if (!valid || !isfinite(d) || !isfinite(velocity)) return 0.0f;
     const float speed = fabsf(velocity);
-    // Encoder noise must not choose a direction at rest. Fade assistance in
-    // over 2 deg/s, with a small residual drag to avoid overcompensation.
-    const float gain = 0.95f * fminf(1.0f, fmaxf(0.0f, (speed - 0.3f) / 2.0f));
-    const float friction = velocity > 0.0f ? open_at(d) + b_open * speed
-                                           : close_at(d) + b_close * speed;
-    const float assist = gain * fminf(FLOOR_MAX, fmaxf(0.0f, friction));
-    return velocity > 0.0f ? assist : -assist;
+    // Preload acts in the same direction on both strokes, including at rest.
+    // Only sliding friction should fade out around a direction reversal.
+    const float bias = bias_at(d);
+    const float fade = fminf(1.0f, fmaxf(0.0f, (speed - 0.3f) / 2.0f));
+    const float sliding = fmaxf(0.0f, 0.5f * (open_at(d) + close_at(d)));
+    const float viscous = (velocity > 0.0f ? b_open : b_close) * speed;
+    const float moving = fade * (sliding + viscous);
+    const float assist = 0.95f * (bias + (velocity > 0.0f ? moving : -moving));
+    return fminf(FLOOR_MAX, fmaxf(-FLOOR_MAX, assist));
 }
 
 // ---- Identification ---------------------------------------------------------
@@ -205,6 +215,24 @@ private:
         return false;
     }
 
+    // Launch unrecorded, then measure at a fixed force. A zero initial level
+    // starts a local descent from the breakaway force measured right here.
+    bool probe(int dir, float* level, float target, float* recovery)
+    {
+        const float launch = breakaway(dir, false);
+        if (launch < 0) return false;
+        if (*level <= 0.0f)
+            *level = fmaxf(cfg_.force_min, fminf(cfg_.u_max, launch * cfg_.start_mult));
+        say("[FID] probe force %.4f.", dir * *level);
+        const PassResult result = pass(dir, *level, target, dir > 0 ? 0 : 1);
+        if (result == FAILED) return false;
+        if (result == STALLED) {
+            say("[FID] low-force probe stalled at %.1f deg (force %.3f).", pos_, *level);
+            if (!sweep(dir, recovery, target, -1)) return false;
+        }
+        return true;
+    }
+
     bool analyse(FrictionMap* out);
 };
 
@@ -212,7 +240,9 @@ bool Runner::run(FrictionMap* out)
 {
     if (cfg_.levels < 2 || !(cfg_.force_decay > 0.0f && cfg_.force_decay < 1.0f) ||
         !(cfg_.start_mult >= 1.0f) || !isfinite(cfg_.start_mult) ||
-        !(cfg_.force_min > 0.0f && cfg_.force_min <= cfg_.u_max)) {
+        !(cfg_.force_min > 0.0f && cfg_.force_min <= cfg_.u_max) ||
+        cfg_.local_levels < 0 || (cfg_.local_levels > 0 &&
+        (!isfinite(cfg_.local_span) || cfg_.local_span < 6.0f))) {
         io_.log("[FID] invalid descending-force configuration.");
         return false;
     }
@@ -274,22 +304,35 @@ bool Runner::run(FrictionMap* out)
         for (int c = 0; c < cfg_.cycles; c++) {
             for (int dir = 1; dir >= -1; dir -= 2) {
                 const float target = dir > 0 ? B : A;
-                const float level = dir > 0 ? lo : lc;
-                // Below breakaway, start moving with an unrecorded force ramp,
-                // then immediately switch to the lower, constant test force.
-                if (breakaway(dir, false) < 0) return false;
-                say("[FID] probe force %.4f.", dir * level);
-                const PassResult result = pass(dir, level, target, dir > 0 ? 0 : 1);
-                if (result == FAILED) return false;
-                if (result == STALLED) {
-                    say("[FID] low-force probe stalled at %.1f deg (force %.3f).", pos_, level);
-                    float& recovery = dir > 0 ? warm_open : warm_close;
-                    if (!sweep(dir, &recovery, target, -1)) return false;
-                }
+                float& level = dir > 0 ? lo : lc;
+                float& recovery = dir > 0 ? warm_open : warm_close;
+                if (!probe(dir, &level, target, &recovery)) return false;
             }
         }
         lo = fmaxf(cfg_.force_min, lo * cfg_.force_decay);
         lc = fmaxf(cfg_.force_min, lc * cfg_.force_decay);
+    }
+    // Half-span overlap lets each section's startup-excluded region be
+    // measured from its neighbour. Ramps and recovery never enter the fit.
+    if (cfg_.local_levels > 0) {
+        const float span = fminf(cfg_.local_span, B - A);
+        float left = A;
+        while (true) {
+            const float right = fminf(B, left + span);
+            say("[FID] local linkage probes between %.1f and %.1f deg.", left, right);
+            if (!sweep(-1, &warm_close, left, -1)) return false;
+            float local_open = 0.0f, local_close = 0.0f;
+            for (int k = 0; k < cfg_.local_levels; k++) {
+                if (!probe(+1, &local_open, right, &warm_open)) return false;
+                if (!probe(-1, &local_close, left, &warm_close)) return false;
+                local_open = fmaxf(cfg_.force_min, local_open * cfg_.force_decay);
+                local_close = fmaxf(cfg_.force_min, local_close * cfg_.force_decay);
+            }
+            if (right >= B) break;
+            left = fminf(left + 0.5f * span, B - span);
+            // Reposition toward release for the next local section.
+            if (!sweep(+1, &warm_open, left, -1)) return false;
+        }
     }
     if (!hold(0.0f, 0.2f)) return false;
     return analyse(out);

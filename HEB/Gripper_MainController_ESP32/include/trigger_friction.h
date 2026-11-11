@@ -12,7 +12,7 @@
 // sense as the CLI 'c' value (the STM32 command is -u).
 //
 // Positions in the map are distances from the release end, d = open - pos
-// (deg). The trigger encoder is incremental and re-zeroes when the STM32
+// (motor deg). The motor-shaft encoder is incremental and re-zeroes when the STM32
 // powers up, but the release end is found again every session, so a map in
 // d stays valid across restarts.
 //
@@ -23,6 +23,8 @@
 //      Launch with a breakaway ramp, then apply the test force unchanged.
 //      Stalls are expected near sliding friction; recover without recording
 //      and continue at the next lower level. Speed is only measured.
+//      Repeat descending probes in overlapping local sections so an early
+//      stall does not prevent low-force measurement of later linkage bumps.
 //   3. For each direction and fine-grained position bin, fit the measured
 //      force as force = f0(pos) + b(pos) * speed. The result is a position x
 //      velocity friction map: friction offset and viscous slope vary as the
@@ -51,7 +53,12 @@ struct FrictionMap
     // limited to 0 .. FLOOR_MAX.
     float floor_at(float d, float v_return, float margin) const;
 
-    // Signed assistance in the direction of motion, tapered to zero at rest.
+    // Direction-independent load inferred from the two directional maps.
+    // Includes repeatable linkage preload / spring load in motor-force units.
+    float bias_at(float d) const;
+
+    // Cancel position-dependent load at rest and add direction-dependent
+    // friction assistance while moving. This does not model linkage geometry.
     float compensation_at(float d, float velocity) const;
 };
 
@@ -82,6 +89,8 @@ struct FrictionIdConfig
     float force_min     = 0.02f;  // lowest test force (c units)
     int   levels        = 12;     // descending force levels
     int   cycles        = 3;      // back-and-forth sweeps per level
+    float local_span    = 8.0f;   // deg per overlapping linkage measurement section
+    int   local_levels  = 6;      // descending local force probes; 0 disables refinement
     float pass_timeout  = 30.0f;  // s per constant-force probe
 };
 

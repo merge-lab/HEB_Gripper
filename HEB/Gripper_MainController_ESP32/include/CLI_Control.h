@@ -23,11 +23,14 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper = null
 // While mapping: 'c <force>' changes force, 'v <hz> <amp>' overlays vibration
 // (0 Hz or amplitude 0 disables it). Type 'e' + Enter to relax and exit.
 // Accepts CR/LF line endings, or processes input after the Serial idle timeout.
-// tactile_force = true is 'tmt' mode: same position mapping, but the
+// tactile_force = true is 'tmt' mode: calibrated motor angles are converted
+// through the four-bar geometry (trigger_linkage.h) for opening and relative
+// force transmission, using the dimensioned closed crank angle. The
 // constant force follows the tactile sensors every loop: tared sums
 // T1+T2+T3 (left finger) and T4+T5+T6 (right finger), each clamped to 0..3;
 // the larger, s, maps logarithmically to c = 0.25 + 1.85 ln(1 + s/2.2),
-// clamped 0.25..1.30 (s 0.5 -> 2 N, s 1 -> 3 N). Prints machine-readable
+// clamped 0.25..1.30 before geometry (nominal closed-pose force reference;
+// final motor command capped at 1.30). Prints machine-readable
 // "TMT,..." lines for heb_console. 'tare' re-zeroes the sensors.
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                      bool tactile_force = false);
@@ -92,7 +95,8 @@ Tactile / slip (FORTE detector runs on-board at 2 kHz, see slip_core.h):
 Trigger friction (trigger_control.h / trigger_friction.h):
   fid                measure friction at descending constant forces (hands off,
                      several minutes); saved to flash; tmt uses a return floor
-                     and tm compensates friction in either direction (try c 0)
+                     and tm/tmt compensate linkage preload and friction
+                     in either direction (try tm, then c 0)
   fid?               print the stored map (FRICMAP / FRICBIN / FRICEND)
   fid_clear          forget the stored map
 */

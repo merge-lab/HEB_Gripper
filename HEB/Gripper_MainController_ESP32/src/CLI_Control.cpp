@@ -2,6 +2,7 @@
 #include "tactile_sensors.h"
 #include "slip_detector.h"
 #include "trigger_control.h"
+#include "trigger_linkage.h"
 #include <esp_timer.h>
 #include <math.h>
 
@@ -121,19 +122,6 @@ static void print_slip_line()
     Serial.printf("SLIP,%.3f,%.3f,%d\n", st.result.avgL, st.result.avgR, st.slip_since_last ? 1 : 0);
 }
 
-static float trigger_friction_compensation(float pos_deg, float trig_vel, const FrictionMap& fmap, float trigger_top)
-{
-    if (!fmap.valid)
-        return 0.0f;
-
-    const float d = trigger_top - pos_deg;
-    const float v = fabsf(trig_vel);
-    const float comp = (trig_vel >= 0.0f)
-        ? (fmap.open_at(d) + fmap.b_open * v + TRIGGER_FLOOR_MARGIN)
-        : (fmap.close_at(d) + fmap.b_close * v + TRIGGER_FLOOR_MARGIN);
-    return comp > 0.0f ? comp : 0.0f;
-}
-
 static void pulse_slip_vibration(HapticMotorController* motor,
                                 bool trigger_engaged,
                                 bool slip_event,
@@ -188,7 +176,7 @@ static const float TAC_FORCE_MIN   = 0.25f;
 static const float TAC_FORCE_MAX   = 1.30f;
 static const float TAC_LOG_K       = 1.85f;
 static const float TAC_LOG_S0      = 2.2f;
-static const float TRIGGER_N_PER_C = 3.18f;   // c x 3.18 = Newtons at the trigger
+static const float TRIGGER_N_PER_C = 3.18f;   // nominal closed-pose reference, N/c
 
 static float tactile_to_force(float s)
 {
@@ -259,6 +247,17 @@ static TriggerMap make_trigger_map(HapticMotorController* motor, const char* lab
 
 void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper, bool tactile_force)
 {
+    // Geometry requires the actual CLOSED motor encoder reference. The
+    // uncalibrated highest-seen-position fallback cannot supply that reference.
+    if (tactile_force && !motor->is_calibrated()) {
+        Serial.println("[TMT] finding motor encoder limits for linkage geometry (hands off).");
+        if (gripper) gripper->stop(nullptr);
+        if (!motor->calibrate_trigger()) {
+            motor->relax(nullptr);
+            Serial.println("[TMT] calibration failed; mapping stopped.");
+            return;
+        }
+    }
     float force = -0.75f;
     String input;
     input.reserve(80);
@@ -266,6 +265,19 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     unsigned long lastInputMs = 0;
 
     TriggerMap trig = make_trigger_map(motor, tactile_force ? "Trigger mapping + tactile force" : "Trigger mapping");
+    TriggerLinkage linkage;
+    if (tactile_force) {
+        if (!linkage.begin(trig.bottom, trig.top)) {
+            motor->relax(nullptr);
+            if (gripper) gripper->stop(nullptr);
+            Serial.println("[TMT] motor range incompatible with linkage geometry; check dimensions/closed angle.");
+            return;
+        }
+        Serial.printf("[TMT] four-bar geometry ON: motor travel %.2f deg -> trigger %.2f deg CCW; "
+                      "closed crank %.3f deg (CAD). Force reference is the closed pose.\n",
+                      linkage.travel, linkage.beta_open - linkage.beta_closed,
+                      TriggerLinkage::closed_motor_deg);
+    }
 
     // tmt: the initial tare waits until the haptic motor and servos have been
     // running for a moment. Their current draw shifts the sensors' supply /
@@ -285,7 +297,10 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     const FrictionMap& fmap = trigger_friction_map();
     if (tactile_force && !fmap.valid) {
         Serial.println("[TMT] no friction map loaded; running friction ID (hands off, may take several minutes).");
-        trigger_friction_id(motor, gripper);
+        if (!trigger_friction_id(motor, gripper)) {
+            Serial.println("[TMT] friction ID failed or aborted; mapping stopped.");
+            return;
+        }
     }
     const bool use_floor = tactile_force && fmap.valid;
     const unsigned long soft_start_ms = millis();
@@ -315,7 +330,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
                       TAC_FORCE_MIN * TRIGGER_N_PER_C, TAC_FORCE_MAX * TRIGGER_N_PER_C,
                       tactile_to_force(0.5f) * TRIGGER_N_PER_C, tactile_to_force(1.0f) * TRIGGER_N_PER_C);
         if (trigger_friction_map().valid)
-            Serial.printf("[TMT] friction floor ON: return at >= %.0f deg/s everywhere (map: %.1f deg travel, "
+            Serial.printf("[TMT] linkage/friction compensation ON; return floor: return at >= %.0f deg/s everywhere (map: %.1f deg travel, "
                           "floor <= %.2f).\n", TRIGGER_RETURN_DEG_S, trigger_friction_map().travel,
                           FrictionMap::FLOOR_MAX);
         else
@@ -327,7 +342,7 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
     }
     else {
         Serial.println("TM commands: c <force>, v <hz> <amp> (0 Hz or amp 0 = off), e to exit.");
-        Serial.println(fmap.valid ? "[TM] directional friction compensation ON; c 0 assists free motion."
+        Serial.println(fmap.valid ? "[TM] linkage preload and friction compensation ON; c 0 assists free motion."
                                  : "[TM] no friction compensation; run 'fid' first.");
     }
 
@@ -442,34 +457,44 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
             c_mag = tactile_to_force(s);
             if (!tmt_tared) c_mag = TAC_FORCE_MIN;   // stale baseline: don't trust it yet
 
-            if (use_floor && !isnan(last_pos)) {
-                // Never below what it takes to return the trigger from here.
-                const float floor = fmap.floor_at(trig.top - last_pos,
-                                                  TRIGGER_RETURN_DEG_S, TRIGGER_FLOOR_MARGIN);
-                if (c_mag < floor) c_mag = floor;
-                // Snapping back too fast: ease off the push (never below 0).
-                if (trig_vel > TRIGGER_MAX_RETURN_DEG_S) {
-                    c_mag -= 0.5f * fmap.b_open * (trig_vel - TRIGGER_MAX_RETURN_DEG_S);
-                    if (c_mag < 0.0f) c_mag = 0.0f;
-                }
-
-                const float friction_comp = trigger_friction_compensation(last_pos, trig_vel, fmap, trig.top);
-                if (friction_comp > 0.0f) {
-                    c_mag += friction_comp;
-                    if (c_mag > TAC_FORCE_MAX) c_mag = TAC_FORCE_MAX;
-                }
-            }
             force = -c_mag;   // same sign convention as 'c'
         }
 
         // Keep the selected base force and heartbeat active; the STM32 retains
         // the vibration overlay and handles limit gating and ramp at 1 kHz.
         // Smooth start (tm and tmt): fade the force in when the mode begins.
-        // Manual c is the requested apparent force. Cancel measured friction
-        // in the direction of motion, including at c 0. STM32 force is -u.
-        const float manual_assist = !tactile_force && !isnan(last_pos)
+        // Both modes request apparent force. Compensate the linkage's
+        // position-dependent preload and friction with the same signed map.
+        const float assist = !isnan(last_pos)
             ? fmap.compensation_at(trig.top - last_pos, trig_vel) : 0.0f;
-        const float force_cmd = (force - manual_assist) * trigger_soft_start_gain(millis() - soft_start_ms);
+        float geometry_scale = 1.0f, unused_opening;
+        if (tactile_force) {
+            // First exchange only reads the encoder; force follows a known pose.
+            geometry_scale = 0.0f;
+            if (isfinite(last_pos) && !linkage.sample(last_pos, &unused_opening, &geometry_scale)) {
+                motor->relax(nullptr);
+                if (gripper) gripper->stop(nullptr);
+                Serial.println("[TMT] invalid linkage position; mapping stopped.");
+                return;
+            }
+        }
+        // Scale the requested trigger resistance, then add measured MOTOR
+        // preload/friction. Scaling the latter would count geometry twice.
+        float motor_push = -force * geometry_scale + assist;
+        if (use_floor && !isnan(last_pos)) {
+            // The return floor already includes friction: apply it to the
+            // final motor push, once. Fade it out as closing motion begins
+            // so it does not oppose closing assistance or step at reversal.
+            const float floor = fmap.floor_at(trig.top - last_pos,
+                                              TRIGGER_RETURN_DEG_S, TRIGGER_FLOOR_MARGIN);
+            const float return_blend = fminf(1.0f, fmaxf(0.0f, (trig_vel + 2.3f) / 2.0f));
+            motor_push += return_blend * fmaxf(0.0f, floor - motor_push);
+            if (trig_vel > TRIGGER_MAX_RETURN_DEG_S)
+                motor_push -= 0.5f * fmap.b_open * (trig_vel - TRIGGER_MAX_RETURN_DEG_S);
+        }
+        if (tactile_force)
+            motor_push = fminf(TAC_FORCE_MAX, fmaxf(-TAC_FORCE_MAX, motor_push));
+        const float force_cmd = -motor_push * trigger_soft_start_gain(millis() - soft_start_ms);
         const bool trigger_engaged = fabsf(force_cmd) > 0.05f;
 
         Response_Packet resp;
@@ -508,6 +533,12 @@ void trigger_mapping(HapticMotorController* motor, DynamixelController* gripper,
         }
 
         float t = trig.t(pos_deg);
+        if (tactile_force && !linkage.sample(pos_deg, &t, &geometry_scale)) {
+            motor->relax(nullptr);
+            if (gripper) gripper->stop(nullptr);
+            Serial.println("[TMT] invalid motor encoder position; mapping stopped.");
+            return;
+        }
 
         // t = 1 (trigger at rest) -> gripper open, t = 0 (fully pulled) -> closed.
         float id0_deg, id1_deg;
