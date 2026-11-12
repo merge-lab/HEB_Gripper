@@ -67,7 +67,9 @@ Serial CLI tool for sending and testing commands
 
 Haptic motor:
   s <k>        spring base (stiffness)
-  c <t>        constant-force base (torque, signed)
+  c <t>        linkage-compensated signed trigger force (closed-pose c units);
+               run cal first; motor command capped at +/-1.30; loaded friction
+               map assists motion (c 0 = compensated free motion)
   n <N>        constant force in Newtons (lateral tip force)
   f <hz>       set vibration frequency
   a <amp>      set vibration amplitude (0 = off)

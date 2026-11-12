@@ -53,6 +53,19 @@ int main()
         assert(m.sample(1000, &t, &scale)); near(t, 1, 1e-6f);
         assert(!m.sample(NAN, &t, &scale));
         assert(!m.sample(INFINITY, &t, &scale));
+        float command;
+        // Signed requests, motor-only assistance, and the final motor cap.
+        assert(m.motor_command(-0.5f, -17, 0, 1.3f, &command)); near(command, -0.5f, 1e-6f);
+        assert(m.motor_command(0.5f, -17, 0, 1.3f, &command)); near(command, 0.5f, 1e-6f);
+        assert(m.motor_command(-0.5f, -17 + travel, 0.1f, 1.3f, &command));
+        near(command, -0.5f * scale - 0.1f, 1e-6f);
+        assert(m.motor_command(0, -17 + travel, 0.1f, 1.3f, &command)); near(command, -0.1f, 1e-6f);
+        assert(m.motor_command(-10, -17 + travel, 0, 1.3f, &command)); near(command, -1.3f, 1e-6f);
+        assert(m.motor_command(10, -17 + travel, 0, 1.3f, &command)); near(command, 1.3f, 1e-6f);
+        assert(!m.motor_command(NAN, -17, 0, 1.3f, &command));
+        assert(!m.motor_command(1, NAN, 0, 1.3f, &command));
+        assert(!m.motor_command(1, -17, NAN, 1.3f, &command));
+        assert(!m.motor_command(1, -17, 0, 0, &command));
         std::printf("motor %.2f deg -> trigger %.3f deg; open force scale %.3f\n",
                     travel, m.beta_open - m.beta_closed, scale);
     }

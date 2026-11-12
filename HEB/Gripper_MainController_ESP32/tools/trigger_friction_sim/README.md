@@ -37,7 +37,8 @@ capped at +/-0.3. Existing stored maps support this decomposition.
 Both `tm` and `tmt` use this signed compensation. In `tmt`, the return floor
 is applied once to the final motor force while stopped or moving toward
 release, fading out smoothly as closing motion starts. The tactile force curve
-still supplies its base resistance. Idle `c 0` remains a raw motor command.
+still supplies its base resistance. Idle CLI `c` also uses linkage geometry
+and the loaded friction map, as described below.
 
 This targets repeatable position-dependent loads, including linkage preload.
 The decomposition assumes approximately symmetric sliding friction; asymmetric
@@ -74,3 +75,16 @@ geometry scaling. Friction identification, return-speed settings, `tm` and
 `TMT,pos` remains motor degrees; `t` is now normalized trigger opening and
 `c` remains the final commanded motor value (after geometry, compensation,
 clamping and startup fade). CSV columns are unchanged.
+
+Idle CLI `c <force>` now requests signed trigger resistance in the same
+closed-pose reference units. Run `cal` first; missing or incompatible limits
+leave the motor relaxed. The CLI refreshes force from motor encoder feedback
+at a 200 Hz target, with a 500 ms startup fade and a final +/-1.30 motor cap.
+Loaded friction/preload assistance is added in motor units; `c 0` requests
+compensated free motion. Run `fid` to obtain a map if one is not loaded.
+There is no tactile return floor in this manual mode. Negative c reverses
+the requested trigger force. Invalid encoder data or a lost ACK relaxes the
+motor and requires another `c` command. Console status stays at 5 Hz:
+`con` shows the selected reference and `set` the scaled motor command.
+Command input is nonblocking, including while awaiting a line ending.
+The `n`, spring and ramp-test commands retain their existing motor behavior.

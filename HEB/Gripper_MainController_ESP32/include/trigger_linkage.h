@@ -72,6 +72,19 @@ struct TriggerLinkage
         *force_scale = j / j_closed;
         return true;
     }
+
+    // Signed STM32 command: negative requests push toward release. Assistance
+    // is in motor units, positive toward release, as in FrictionMap.
+    bool motor_command(float requested, float motor_pos, float assistance,
+                       float limit, float* command) const
+    {
+        float opening, scale;
+        if (!isfinite(requested) || !isfinite(assistance) ||
+            !isfinite(limit) || limit <= 0 || !sample(motor_pos, &opening, &scale))
+            return false;
+        *command = fminf(limit, fmaxf(-limit, requested * scale - assistance));
+        return true;
+    }
 };
 
 #endif

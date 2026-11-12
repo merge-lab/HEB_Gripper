@@ -1069,6 +1069,7 @@ void CLI_Setup(HapticMotorController* motor, DynamixelController* gripper)
     }
 
     Serial.println("Haptic:  s/c/n/f/a/v/sweep/rampup/stop");
+    Serial.println("c <force>: linkage-compensated trigger force; run cal first (fid adds friction assistance).");
     Serial.println("Gripper: m <id0> <id1> [rpm]   mw <id0> <id1> [rpm]   gstop   gping   gpos");
     Serial.println("Modes:   tm (trigger map)   tml (trigger map + log)   tac [hz] (tactile stream, 100 default, 2000 max)   tmt (trigger map + tactile force)   tare   hu (haptic update)   cal (calibrate)   sl (send limits)");
     Serial.println("Slip:    slip_thr <v>   slip_gate <v>   slip?   (FORTE detector, on-board at 2 kHz)");
@@ -1085,9 +1086,39 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
     static bool  sweep   = false;
     static bool  relaxed = true;          // boot relaxed (safe); engage on command
     static int   sweepIdx = 0, sweepTick = 0;
+    static unsigned long last_sweep_ms = 0;
+    static bool linkage_constant = false;
+    static TriggerLinkage cli_linkage;
+    static float last_pos = NAN, motor_velocity = 0.0f;
+    static unsigned long last_pos_us = 0, force_start_ms = 0, last_print_ms = 0;
+    static String input;
+    static bool input_overflow = false;
+    static unsigned long last_input_ms = 0;
 
-    if (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
+    // Do not suspend force updates while waiting for a command's line ending.
+    String line;
+    bool have_line = false;
+    for (int bytes = 0; bytes < 64; ++bytes) {
+        char ch;
+        if (Serial.available()) {
+            ch = (char)Serial.read();
+            last_input_ms = millis();
+        } else if ((input.length() || input_overflow) &&
+                   millis() - last_input_ms >= Serial.getTimeout()) {
+            ch = '\n';
+        } else break;
+        if (ch == '\n' || ch == '\r') {
+            if (input_overflow) Serial.println("[CLI] command too long; discarded.");
+            else { line = input; have_line = line.length() > 0; }
+            input = "";
+            input_overflow = false;
+            break;
+        }
+        if (input.length() < 79 && !input_overflow) input += ch;
+        else input_overflow = true;
+    }
+    if (have_line) {
+        last_pos = NAN; motor_velocity = 0.0f;
         line.trim();
 
         if (line.equalsIgnoreCase("stop") || line.equalsIgnoreCase("x") ||
@@ -1196,12 +1227,31 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
             arg.trim();
 
             if (ch == 's' || ch == 'S') {
+                linkage_constant = false;
                 relaxed = false; mode = MODE_SPRING; value = arg.toFloat();
                 Serial.printf("base = spring %.3f\n", value);
             } else if (ch == 'c' || ch == 'C') {
-                relaxed = false; mode = MODE_CONSTANT; value = -arg.toFloat();
-                Serial.printf("base = constant %.3f\n", value);
+                float requested;
+                char extra;
+                if (sscanf(arg.c_str(), " %f %c", &requested, &extra) != 1 || !isfinite(requested)) {
+                    Serial.println("[CLI] usage: c <finite signed force>");
+                } else if (!motor->is_calibrated() ||
+                           !cli_linkage.begin(motor->get_limit_close(), motor->get_limit_open())) {
+                    linkage_constant = false;
+                    relaxed = true; sweep = false; value = 0.0f;
+                    Serial.println("[CLI] c requires calibrated limits compatible with the linkage; run 'cal' first.");
+                } else {
+                    // Read a fresh pose before applying force, including after
+                    // calibration or returning from another blocking mode.
+                    last_pos = NAN; motor_velocity = 0.0f;
+                    force_start_ms = millis();
+                    linkage_constant = true;
+                    relaxed = false; mode = MODE_CONSTANT; value = -requested;
+                    Serial.printf("base = constant %.3f (linkage compensated, motor cap %.2f; friction %s)\n",
+                                  value, TAC_FORCE_MAX, trigger_friction_map().valid ? "ON" : "OFF");
+                }
             } else if (ch == 'n' || ch == 'N') {
+                linkage_constant = false;
                 float N = arg.toFloat();
                 relaxed = false; mode = MODE_CONSTANT; value = -(N + 0.122f) / 3.18f;
                 Serial.printf("base = %.3f N (unitless %+.3f)\n", N, value);
@@ -1243,7 +1293,8 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
     }
 
     // Auto-sweep: advance through SWEEP_FREQS, holding the current amplitude.
-    if (!relaxed && sweep && vibAmp > 0.0f) {
+    if (!relaxed && sweep && vibAmp > 0.0f && millis() - last_sweep_ms >= 200) {
+        last_sweep_ms = millis();
         if (sweepTick == 0) {
             vibFreq = SWEEP_FREQS[sweepIdx];
             applyVibrate(vibFreq, vibAmp, motor);
@@ -1258,29 +1309,74 @@ void CLI(HapticMotorController* motor, DynamixelController* gripper)
     // also serves as the heartbeat that keeps the STM's fail-safe from firing.
     Response_Packet resp;
     bool ok;
+    const unsigned long cycle_start_us = micros();
+    const bool compensated = !relaxed && mode == MODE_CONSTANT && linkage_constant;
+    float command = value;
+    if (compensated) {
+        command = 0.0f; // first exchange acquires the pose without force
+        if (isfinite(last_pos)) {
+            const float assist = trigger_friction_map().compensation_at(
+                motor->get_limit_open() - last_pos, motor_velocity);
+            if (!cli_linkage.motor_command(value, last_pos, assist, TAC_FORCE_MAX, &command)) {
+                linkage_constant = false;
+                relaxed = true; sweep = false; value = 0.0f;
+                Serial.println("[CLI] invalid linkage force/position; relaxed.");
+            }
+            command *= trigger_soft_start_gain(millis() - force_start_ms);
+        }
+    }
     if (relaxed) {
         ok = motor->relax(&resp);
     } else {
         ok = (mode == MODE_SPRING) ? motor->set_spring_force(value, &resp)
-                                   : motor->set_constant_force(value, &resp);
+                                   : motor->set_constant_force(command, &resp, compensated ? 20 : 500);
     }
 
+    const bool print_now = !compensated || millis() - last_print_ms >= 200;
+    if (print_now) last_print_ms = millis();
     if (ok) {
         float pos_deg, torque, motor_t, user_t;
         memcpy(&pos_deg, &resp.encoder_value,   sizeof(pos_deg));
         memcpy(&torque,  &resp.motor_value,     sizeof(torque));
         memcpy(&motor_t, &resp.measured_torque, sizeof(motor_t));
         memcpy(&user_t,  &resp.user_torque,     sizeof(user_t));
+        if (compensated) {
+            if (!isfinite(pos_deg)) {
+                linkage_constant = false;
+                motor->relax(nullptr);
+                relaxed = true; sweep = false; value = 0.0f;
+                last_pos = NAN;
+                Serial.println("[CLI] invalid motor encoder position; relaxed.");
+            } else {
+                const unsigned long now_us = micros();
+                if (isfinite(last_pos) && now_us != last_pos_us)
+                    motor_velocity += 0.3f * ((pos_deg - last_pos) /
+                        ((now_us - last_pos_us) * 1e-6f) - motor_velocity);
+                last_pos = pos_deg;
+                last_pos_us = now_us;
+            }
+        }
         unsigned long raw_enc = (unsigned long)resp.raw_encoder;   // raw counter, plain integer
-        Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f switch40=%s switch41=%s led42=%s\n",
+        if (print_now) Serial.printf("[%s | %s %.2f | vib %dHz %.2f%s] set=%+.3f pos=%+.2f enc=%lu cmd=%+.3f motorT=%+.3f userT=%+.3f switch40=%s switch41=%s led42=%s\n",
                       relaxed ? "RELAX" : "ON",
                       mode == MODE_SPRING ? "spr" : "con", value,
                       vibFreq, vibAmp, sweep ? " SWEEP" : "",
-                      relaxed ? 0.0f : value,
+                      relaxed ? 0.0f : command,
                       pos_deg, raw_enc, torque, motor_t, user_t, switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
     } else {
-        Serial.printf("no ACK (rejected or timed out) switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
+        if (compensated) {
+            // Never continue force control from an encoder sample predating a
+            // timeout. Require a fresh c command after the link recovers.
+            motor->relax(nullptr);
+            linkage_constant = false;
+            relaxed = true; sweep = false; value = 0.0f; last_pos = NAN;
+            Serial.println("[CLI] haptic link lost; relaxed.");
+        } else if (print_now)
+            Serial.printf("no ACK (rejected or timed out) switch40=%s switch41=%s led42=%s\n", switchState(SWITCH_40_PIN), switchState(SWITCH_41_PIN), ledState());
     }
 
-    delay(200);
+    if (compensated) {
+        const unsigned long elapsed = micros() - cycle_start_us;
+        if (elapsed < 5000) delayMicroseconds(5000 - elapsed);
+    } else delay(200);
 }
