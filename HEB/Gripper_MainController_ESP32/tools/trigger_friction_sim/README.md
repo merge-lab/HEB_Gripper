@@ -88,3 +88,13 @@ motor and requires another `c` command. Console status stays at 5 Hz:
 `con` shows the selected reference and `set` the scaled motor command.
 Command input is nonblocking, including while awaiting a line ending.
 The `n`, spring and ramp-test commands retain their existing motor behavior.
+
+After `cal`, the release-end force fade spans the final 5% of calibrated
+motor travel, replacing the old fixed 15-degree zone. Limit-release
+hysteresis is 0.5% of motor travel so it stays inside the fade zone. For a
+47-degree motor stroke these are 2.35 degrees and 0.235 degrees respectively.
+The exponential fade shape and stop cutoff are unchanged. These parameters
+are sent to the STM32 using the existing SET_LIMITS command and apply to
+constant-force modes, including `c` and `tmt`. Calibration prints the actual
+travel and zone sizes. `LIMIT_RAMP_FRACTION` in `haptic_motor_control.h` can
+be set to 0.02 for a 2% zone. Re-run `cal` after flashing.

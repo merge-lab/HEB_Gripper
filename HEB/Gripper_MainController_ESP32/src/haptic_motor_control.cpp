@@ -269,11 +269,20 @@ bool HapticMotorController::calibrate_trigger(float cal_force)
 
     relax(nullptr);
 
+    const float travel = fabsf(lim1 - lim2);
+    if (!isfinite(lim1) || !isfinite(lim2) || !isfinite(travel) || !(travel > LIMIT_THRESHOLD)) {
+        Serial.println("[CAL] invalid or zero motor travel; calibration failed.");
+        return false;
+    }
     LIMIT_OPEN   = (lim1 > lim2) ? lim1 : lim2;
     LIMIT_CLOSE  = (lim1 > lim2) ? lim2 : lim1;
+    LIMIT_RAMP_ZONE = travel * LIMIT_RAMP_FRACTION;
+    LIMIT_HYSTERESIS = travel * LIMIT_HYSTERESIS_FRACTION;
     last_encoder = LIMIT_OPEN;
     calibrated   = true;
     send_limits();
+    Serial.printf("[CAL] motor travel %.2f deg; release fade %.2f deg (%.1f%%), hysteresis %.2f deg.\n",
+                  travel, LIMIT_RAMP_ZONE, 100.0f * LIMIT_RAMP_FRACTION, LIMIT_HYSTERESIS);
     return true;
 }
 

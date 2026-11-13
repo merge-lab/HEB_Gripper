@@ -178,8 +178,11 @@ private:
     float LIMIT_OPEN      = 0.0f;
     float LIMIT_CLOSE     = 0.0f;
     float LIMIT_THRESHOLD  =  0.01f;  // dead-zone entry size (degrees) at each limit
-    float LIMIT_HYSTERESIS =  3.0f;  // extra clearance required to exit the limit state
-    float LIMIT_RAMP_ZONE  =  15.0f;  // degrees over which force tapers to 0 before the threshold
+    // Fractions of calibrated MOTOR travel. Use 0.02..0.05 for a 2..5% fade.
+    static constexpr float LIMIT_RAMP_FRACTION = 0.05f;
+    static constexpr float LIMIT_HYSTERESIS_FRACTION = 0.005f;
+    float LIMIT_HYSTERESIS = 0.0f;  // computed by calibration: 0.5% of travel
+    float LIMIT_RAMP_ZONE  = 0.0f;  // computed by calibration: final 5% of travel
     float LIMIT_RAMP_EXP   =   3.0f;  // exponential curve steepness (higher = more convex), max = 88.7
     bool  calibrated      = false;
     float last_encoder    = 0.0f;  // encoder value from the most recent update_force_slip call
